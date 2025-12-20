@@ -334,9 +334,8 @@ pub struct NetworkService {
 /// Network behavior combining all protocols
 pub struct KratosBehaviour {
     pub gossipsub: gossipsub::Behaviour,    // Block/tx propagation
-    pub kademlia: kad::Behaviour,            // Peer discovery
-    pub mdns: mdns::tokio::Behaviour,        // Local discovery
-    pub identify: identify::Behaviour,       // Peer identification
+    pub request_response: Behaviour,         // Direct peer queries
+    pub kademlia: kad::Behaviour,            // Peer discovery (DHT)
 }
 ```
 
@@ -345,9 +344,8 @@ pub struct KratosBehaviour {
 | Protocol | Purpose |
 |----------|---------|
 | **Gossipsub** | Block and transaction propagation |
+| **Request-Response** | Direct peer queries (sync, status, genesis) |
 | **Kademlia DHT** | Distributed peer discovery |
-| **mDNS** | Local network discovery (auto-dials discovered peers) |
-| **Identify** | Peer capability exchange |
 
 ### Protocol Topics
 
@@ -370,10 +368,9 @@ KratOs implements decentralized peer discovery via DNS Seeds. When a node starts
 
 **Discovery Order:**
 ```
-1. DNS Seeds     → Query seed1.kratos.network, etc.
-2. CLI Bootnodes → Use --bootnode /ip4/.../p2p/...
-3. mDNS          → Discover and dial local network peers
-4. Kademlia DHT  → Learn peers from connected nodes
+1. DNS Seeds + Fallback Bootnodes → Always resolved together
+2. CLI Bootnodes                  → Use --bootnode /ip4/.../p2p/...
+3. Kademlia DHT                   → Learn peers from connected nodes
 ```
 
 **DNS Seed Resolution:**
@@ -385,12 +382,12 @@ pub struct DnsSeedResolver {
 }
 
 impl DnsSeedResolver {
-    /// Resolve all DNS seeds in parallel
+    /// Resolve all DNS seeds and always include fallback bootnodes
     pub fn resolve(&mut self) -> DnsResolutionResult {
         // 1. Query each DNS seed hostname
         // 2. Collect returned IP addresses
-        // 3. Convert to multiaddr format
-        // 4. Fall back to hardcoded bootnodes if needed
+        // 3. ALWAYS include fallback bootnodes (they have PeerIds)
+        // 4. Return combined result
     }
 }
 ```

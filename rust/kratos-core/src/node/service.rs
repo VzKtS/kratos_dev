@@ -217,28 +217,26 @@ impl KratOsNode {
                     }
                 }
             } else {
-                // No bootnodes - rely on mDNS for local network discovery
-                info!("🔍 No bootstrap nodes configured - using mDNS for local network discovery");
-                info!("   Ensure a genesis node is running on the same local network");
+                // No bootnodes - DNS seeds should provide them
+                warn!("⚠️  No bootstrap nodes configured - check DNS seed configuration");
+                info!("   Ensure DNS seeds are reachable or configure --bootnode manually");
             }
 
             // Wait for genesis info from network (with timeout)
-            info!("⏳ Waiting for genesis info from network (mDNS discovery active)...");
-            let genesis_timeout = std::time::Duration::from_secs(60); // 60s timeout for mDNS discovery
+            info!("⏳ Waiting for genesis info from network...");
+            let genesis_timeout = std::time::Duration::from_secs(60);
             let start_time = std::time::Instant::now();
             let mut last_status_log = std::time::Instant::now();
             let mut received_genesis: Option<(Block, Hash)> = None;
 
             // Run network and wait for genesis response
-            // CRITICAL: We must poll the network frequently to receive mDNS discovery events
-            // mDNS discovery can take 2-5 seconds on local networks
             while received_genesis.is_none() {
                 if start_time.elapsed() > genesis_timeout {
                     let peers = network.peer_count();
                     return Err(NodeError::Network(format!(
                         "Timeout waiting for genesis from network after {}s (connected peers: {}). Ensure:\n\
                          1. A genesis node is running (started with --genesis flag)\n\
-                         2. Both nodes are on the same local network for mDNS discovery\n\
+                         2. DNS seeds are configured and reachable\n\
                          3. Or configure a bootnode with --bootnode flag pointing to a reachable node",
                         genesis_timeout.as_secs(), peers
                     )));
@@ -252,8 +250,7 @@ impl KratOsNode {
                     last_status_log = std::time::Instant::now();
                 }
 
-                // Poll the network multiple times to process mDNS discovery and other events
-                // mDNS events need to be processed frequently for timely discovery
+                // Poll the network to process connection and protocol events
                 for _ in 0..5 {
                     network.poll_once().await;
                 }
@@ -286,7 +283,7 @@ impl KratOsNode {
                     }
                 }
 
-                // Small sleep to prevent CPU spinning, but keep it short for responsive mDNS
+                // Small sleep to prevent CPU spinning
                 if received_genesis.is_none() {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
@@ -337,7 +334,7 @@ impl KratOsNode {
                 info!("🌐 Total bootstrap nodes: {}", bootstrap_addrs.len());
                 network.add_bootstrap_nodes(bootstrap_addrs);
             } else {
-                info!("ℹ️  No bootstrap nodes - using mDNS for local peer discovery");
+                info!("ℹ️  No bootstrap nodes configured - check DNS seed configuration");
             }
             // Also set genesis info so we can serve it to other joining nodes
             network.set_genesis_info(genesis_block.clone(), config.chain_name.clone());
@@ -1037,10 +1034,10 @@ impl KratOsNode {
 
     /// Poll the network once - processes pending swarm events
     /// MUST be called regularly to:
-    /// - Process mDNS discovery/announcements
     /// - Accept incoming connections
     /// - Handle request-response messages (genesis, sync, status)
     /// - Send/receive gossipsub messages
+    /// - Process Kademlia DHT events
     pub async fn poll_network(&self) {
         let mut network = self.network.write().await;
         network.poll_once().await;

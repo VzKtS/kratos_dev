@@ -118,7 +118,7 @@ async fn run_event_loop(
     let mut slot_interval = tokio::time::interval(std::time::Duration::from_secs(SLOT_DURATION_SECS));
 
     // Network polling interval - poll frequently to ensure responsive network
-    // CRITICAL FIX: Without this, mDNS discovery, peer connections, and genesis requests don't work!
+    // CRITICAL: Without this, peer connections and genesis requests don't work!
     let mut network_poll_interval = tokio::time::interval(std::time::Duration::from_millis(100));
 
     // Get genesis timestamp for slot calculation
@@ -143,12 +143,12 @@ async fn run_event_loop(
                 handle_rpc_call(&node, call, config).await;
             }
 
-            // CRITICAL: Network polling - processes mDNS, connections, genesis requests
+            // CRITICAL: Network polling - processes connections, genesis requests, sync
             // Without this, the node cannot:
-            // - Discover peers via mDNS
             // - Accept incoming connections
             // - Respond to genesis requests from joining nodes
             // - Process sync requests
+            // - Handle gossipsub messages
             _ = network_poll_interval.tick() => {
                 // Poll the network to process pending swarm events
                 node.poll_network().await;

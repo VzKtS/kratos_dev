@@ -20,7 +20,6 @@ use tokio::sync::RwLock;
 use libp2p::{
     gossipsub::Event as GossipsubEvent,
     kad::Event as KadEvent,
-    mdns::Event as MdnsEvent,
     request_response::{self, Event as ReqResEvent, Message as ReqResMessage},
     swarm::SwarmEvent,
     Multiaddr, PeerId, Swarm, SwarmBuilder,
@@ -466,29 +465,6 @@ impl NetworkService {
             // Request-response events
             super::behaviour::KratOsBehaviourEvent::RequestResponse(event) => {
                 self.handle_request_response_event(event);
-            }
-
-            // mDNS events
-            super::behaviour::KratOsBehaviourEvent::Mdns(MdnsEvent::Discovered(list)) => {
-                for (peer_id, multiaddr) in list {
-                    info!("🔍 mDNS discovered peer: {} at {}", peer_id, multiaddr);
-                    self.swarm.behaviour_mut().add_address(peer_id, multiaddr.clone());
-                    self.peer_manager.add_peer_address(peer_id, multiaddr.clone());
-
-                    // CRITICAL FIX: Actually dial the discovered peer to establish connection
-                    // Without this, we only know about the peer but never connect
-                    if !self.peer_manager.is_connected(&peer_id) {
-                        info!("📞 Dialing mDNS peer {} at {}", peer_id, multiaddr);
-                        if let Err(e) = self.swarm.dial(multiaddr.clone()) {
-                            warn!("Failed to dial mDNS peer {}: {:?}", peer_id, e);
-                        }
-                    }
-                }
-            }
-            super::behaviour::KratOsBehaviourEvent::Mdns(MdnsEvent::Expired(list)) => {
-                for (peer_id, _) in list {
-                    debug!("mDNS peer expired: {}", peer_id);
-                }
             }
 
             // Kademlia events

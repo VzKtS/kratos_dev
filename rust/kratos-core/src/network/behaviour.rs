@@ -4,7 +4,6 @@
 use libp2p::{
     gossipsub::{self, IdentTopic, MessageAuthenticity, ValidationMode},
     kad::{self, store::MemoryStore},
-    mdns,
     request_response::{self, ProtocolSupport},
     swarm::NetworkBehaviour,
     PeerId, StreamProtocol,
@@ -47,9 +46,6 @@ pub struct KratOsBehaviour {
 
     /// Request-response for direct peer queries
     pub request_response: request_response::Behaviour<KratosCodec>,
-
-    /// mDNS for local peer discovery
-    pub mdns: mdns::async_io::Behaviour,
 
     /// Kademlia for global peer discovery
     pub kad: kad::Behaviour<MemoryStore>,
@@ -106,12 +102,6 @@ impl KratOsBehaviour {
                 .with_request_timeout(std::time::Duration::from_secs(30)),
         );
 
-        // Configure mDNS
-        let mdns = mdns::async_io::Behaviour::new(
-            mdns::Config::default(),
-            local_peer_id,
-        )?;
-
         // Configure Kademlia
         let mut kad = kad::Behaviour::new(
             local_peer_id,
@@ -123,7 +113,6 @@ impl KratOsBehaviour {
         Ok(Self {
             gossipsub,
             request_response,
-            mdns,
             kad,
         })
     }

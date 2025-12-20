@@ -115,10 +115,6 @@ pub struct RunCmd {
     #[arg(long, requires = "validator")]
     pub validator_key: Option<PathBuf>,
 
-    /// Disable mDNS peer discovery
-    #[arg(long)]
-    pub no_mdns: bool,
-
     /// Sync mode (full, light, warp)
     #[arg(long, default_value = "full")]
     pub sync: String,
@@ -377,7 +373,6 @@ mod tests {
             max_peers: 50,
             validator: false,
             validator_key: None,
-            no_mdns: false,
             sync: "full".to_string(),
             pruning: "256".to_string(),
             db_cache: 128,

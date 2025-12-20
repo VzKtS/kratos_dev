@@ -43,7 +43,7 @@ clap = { version = "4.4", features = ["derive", "env"] }
 dirs = "5.0"
 
 # Networking (P2P)
-libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "mdns", "kad", "async-std", "macros", "request-response"] }
+libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "async-std", "macros", "request-response"] }
 futures = "0.3"
 async-std = { version = "1.12", features = ["attributes"] }
 

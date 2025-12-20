@@ -52,8 +52,7 @@ pub const OFFICIAL_DNS_SEEDS: &[&str] = &[
 /// Format: /ip4/<IP>/tcp/<PORT>/p2p/<PEER_ID>
 pub const FALLBACK_BOOTNODES: &[&str] = &[
     // KratOs Dev VPS bootstrap node
-    // TODO: Add PeerId once node is running on VPS
-    // "/ip4/45.8.132.252/tcp/30333/p2p/<PEER_ID>",
+    "/ip4/45.8.132.252/tcp/30333/p2p/12D3KooWEko82RoEwFb1tr6KkmgNhCdGKUdoTjrMcex5WQnvaKSY",
 ];
 
 // =============================================================================
@@ -204,11 +203,11 @@ impl DnsSeedResolver {
             discovered_ips.len()
         );
 
-        // If no peers from DNS, try fallbacks
-        if discovered_ips.is_empty() {
-            info!("No peers from DNS, trying fallback bootnodes...");
-            return self.resolve_fallbacks();
-        }
+        // ALWAYS include fallback bootnodes (they have PeerIds which DNS cannot provide)
+        // DNS seeds only return IPs, but libp2p needs PeerIds to connect properly
+        info!("Adding fallback bootnodes with PeerIds...");
+        let fallback_result = self.resolve_fallbacks();
+        result.peers.extend(fallback_result.peers);
 
         result
     }

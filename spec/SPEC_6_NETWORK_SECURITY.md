@@ -323,18 +323,15 @@ KratOs implements decentralized peer discovery via **DNS Seeds** - specialized D
 Node Startup
     │
     ▼
-1. DNS Seeds (Primary)
-    │ seed1.kratos.network → [IP list]
-    │ seed2.kratos.community → [IP list]
+1. DNS Seeds + Fallback Bootnodes (Primary)
+    │ DNS: seed1.kratos.network → [IP list]
+    │ Bootnodes: /ip4/X.X.X.X/tcp/30333/p2p/...
     ▼
-2. Hardcoded Bootnodes (Fallback)
-    │ /ip4/X.X.X.X/tcp/30333/p2p/...
+2. CLI Bootnodes (Manual)
+    │ --bootnode /ip4/X.X.X.X/tcp/30333/p2p/...
     ▼
-3. mDNS (Local Network)
-    │ Discover peers on same LAN
-    ▼
-4. Kademlia DHT (Propagation)
-    │ Learn peers from connected peers
+3. Kademlia DHT (Propagation)
+    │ Learn peers from connected nodes
     ▼
 Connected to Network
 ```
@@ -374,7 +371,7 @@ Connected to Network
 | Threat | Mitigation |
 |--------|------------|
 | Poisoned seeds | Multiple independent sources |
-| DNS hijacking | Fallback to hardcoded bootnodes |
+| DNS hijacking | Fallback bootnodes always included |
 | Eclipse attack | DHT propagation diversifies peers |
 | Sybil seeds | Community vetting of operators |
 
@@ -390,14 +387,12 @@ Connected to Network
 ```rust
 // Official DNS Seeds (populated at mainnet)
 pub const OFFICIAL_DNS_SEEDS: &[&str] = &[
-    // "seed1.kratos.network",
-    // "seed2.kratos.community",
+    "45.8.132.252",  // KratOs Dev VPS
 ];
 
-// Fallback hardcoded bootnodes
+// Fallback hardcoded bootnodes (always included in resolution)
 pub const FALLBACK_BOOTNODES: &[&str] = &[
-    // KratOs Foundation bootstrap node
-    "/ip4/78.240.168.225/tcp/30333/p2p/12D3KooWEko82RoEwFb1tr6KkmgNhCdGKUdoTjrMcex5WQnvaKSY",
+    "/ip4/45.8.132.252/tcp/30333/p2p/12D3KooWEko82RoEwFb1tr6KkmgNhCdGKUdoTjrMcex5WQnvaKSY",
 ];
 
 // Default P2P port
@@ -408,7 +403,7 @@ pub const DEFAULT_P2P_PORT: u16 = 30333;
 
 | Node | IP | Peer ID | Operator |
 |------|-----|---------|----------|
-| Foundation Node 1 | 78.240.168.225 | 12D3KooWEko82Ro... | KratOs Foundation |
+| Dev VPS | 45.8.132.252 | 12D3KooWEko82Ro... | KratOs Dev |
 
 **Note:** Additional bootstrap nodes will be added as the network grows.
 
