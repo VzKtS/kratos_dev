@@ -1,5 +1,12 @@
 # KratOs - Decentralized Governance Blockchain
 
+> **VERSION: DEVELOPMENT - NON FUNCTIONAL**
+>
+> This is an active development branch. The code is not ready for production use.
+> Pull requests and contributions are welcome.
+
+---
+
 **A from-scratch blockchain implementation in pure Rust, designed for long-term resilience and democratic governance.**
 
 ## Overview
