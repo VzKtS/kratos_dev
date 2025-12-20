@@ -1,0 +1,45 @@
+[package]
+name = "kratos-wallet"
+version = "0.1.0"
+edition = "2021"
+description = "KratOs Wallet CLI - Secure wallet for managing KRAT tokens"
+authors = ["KratOs Team"]
+
+[[bin]]
+name = "kratos-wallet"
+path = "src/main.rs"
+
+[dependencies]
+# Crypto
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+sha2 = "0.10"
+aes-gcm = "0.10"
+argon2 = "0.5"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+hex = "0.4"
+
+# Networking (rustls for no OpenSSL dependency)
+reqwest = { version = "0.11", default-features = false, features = ["json", "blocking", "rustls-tls"] }
+tokio = { version = "1.35", features = ["full"] }
+
+# CLI
+dialoguer = "0.11"
+console = "0.15"
+indicatif = "0.17"
+
+# Utils
+dirs = "5.0"
+chrono = "0.4"
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.23"
+
+[profile.release]
+opt-level = 3
+lto = true

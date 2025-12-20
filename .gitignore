@@ -1,0 +1,57 @@
+# Rust
+/rust/kratos-core/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Build artifacts
+*.o
+*.a
+*.so
+*.dylib
+
+# Debug
+debug/
+*.dSYM/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Node (if any JS tooling)
+node_modules/
+
+# Database
+*.db
+*.sqlite
+data/
+
+# Gradle (Kotlin client)
+kotlin_client/.gradle/
+kotlin_client/build/
+kotlin_client/bin/
+kotlin_client/.kotlin/
+*.class
+
+# Validator keys (sensitive)
+*.json
+!rust/kratos-core/Cargo.lock
