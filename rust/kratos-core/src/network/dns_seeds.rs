@@ -42,13 +42,8 @@ pub const MIN_DNS_SEEDS: usize = 1;
 /// 2. Submit a PR to add your seed to this list
 /// 3. Seeds are reviewed for reliability and independence
 pub const OFFICIAL_DNS_SEEDS: &[&str] = &[
-    // Placeholder seeds - will be replaced with real seeds at mainnet launch
-    // Format: "seed<N>.kratos.network"
-    //
-    // Community-operated seeds (examples):
-    // "seed1.kratos.network",    // Operated by: KratOs Foundation
-    // "seed2.kratos.community",  // Operated by: Community Member A
-    // "seed3.kratos.io",         // Operated by: Community Member B
+    // Development/Devnet seed
+    "45.8.132.252",  // KratOs Dev VPS
 ];
 
 /// Fallback hardcoded bootnodes for when DNS fails
@@ -56,8 +51,9 @@ pub const OFFICIAL_DNS_SEEDS: &[&str] = &[
 ///
 /// Format: /ip4/<IP>/tcp/<PORT>/p2p/<PEER_ID>
 pub const FALLBACK_BOOTNODES: &[&str] = &[
-    // KratOs Foundation bootstrap node
-    "/ip4/78.240.168.225/tcp/30333/p2p/12D3KooWEko82RoEwFb1tr6KkmgNhCdGKUdoTjrMcex5WQnvaKSY",
+    // KratOs Dev VPS bootstrap node
+    // TODO: Add PeerId once node is running on VPS
+    // "/ip4/45.8.132.252/tcp/30333/p2p/<PEER_ID>",
 ];
 
 // =============================================================================
