@@ -1,5 +1,5 @@
 # Rust
-/rust/kratos-core/target/
+**/target/
 **/*.rs.bk
 
 # IDE
