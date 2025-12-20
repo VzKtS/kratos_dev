@@ -52,7 +52,7 @@ pub const OFFICIAL_DNS_SEEDS: &[&str] = &[
 /// Format: /ip4/<IP>/tcp/<PORT>/p2p/<PEER_ID>
 pub const FALLBACK_BOOTNODES: &[&str] = &[
     // KratOs Dev VPS bootstrap node
-    "/ip4/45.8.132.252/tcp/30333/p2p/12D3KooWEko82RoEwFb1tr6KkmgNhCdGKUdoTjrMcex5WQnvaKSY",
+    "/ip4/45.8.132.252/tcp/30333/p2p/12D3KooWS4DyZ6dLGmGdhnnQYqa19CUmwj5S5qdFMDMDEP3aHoUh",
 ];
 
 // =============================================================================
