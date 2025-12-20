@@ -4,6 +4,12 @@
 >
 > This is an active development branch. The code is not ready for production use.
 > Pull requests and contributions are welcome.
+>
+> **Roadmap:**
+> - `kratos_dev` (here) → Development & Devnet
+> - [`KratOs`](https://github.com/VzKtS/KratOs) → Testnet & Mainnet
+>
+> Once Dev and Devnet phases are complete, the project will be merged into the main repository.
 
 ---
 
