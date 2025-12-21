@@ -192,7 +192,7 @@ async fn try_produce_block(node: &Arc<KratOsNode>, validator_key: &SigningKey, g
 
     // Calculate epoch from BLOCK HEIGHT (not time) for economics/bootstrap checks
     // This ensures epoch-based features (rewards, bootstrap) work correctly even when
-    // the node has been idle (e.g., dev mode) and time has passed without blocks
+    // the node has been idle and time has passed without blocks
     let current_block_height = node.chain_height().await;
     let current_epoch = current_block_height / EPOCH_DURATION_BLOCKS;
 
@@ -210,7 +210,7 @@ async fn try_produce_block(node: &Arc<KratOsNode>, validator_key: &SigningKey, g
         Ok(Some(block)) => {
             // Broadcast the block
             if let Err(e) = node.broadcast_block(block).await {
-                // In dev/solo mode, InsufficientPeers is expected - don't spam logs
+                // InsufficientPeers is expected when no peers are connected - don't spam logs
                 let err_str = format!("{:?}", e);
                 if err_str.contains("InsufficientPeers") {
                     debug!("Broadcast skipped (no peers connected)");

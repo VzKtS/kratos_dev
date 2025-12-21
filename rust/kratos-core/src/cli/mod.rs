@@ -248,8 +248,8 @@ pub struct PurgeCmd {
     #[arg(short = 'd', long)]
     pub base_path: Option<PathBuf>,
 
-    /// Chain to purge (dev, local, mainnet)
-    #[arg(long, default_value = "dev")]
+    /// Chain to purge (chain name)
+    #[arg(long, default_value = "kratos")]
     pub chain: String,
 
     /// Skip confirmation prompt

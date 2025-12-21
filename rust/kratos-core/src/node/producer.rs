@@ -789,7 +789,6 @@ pub struct BlockProducer {
 
 impl BlockProducer {
     /// Create a new block producer
-    /// Uses get_bootstrap_config() to automatically select devnet or default config
     pub fn new(validator_key: Option<ed25519_dalek::SigningKey>, db: Arc<Database>) -> Self {
         Self {
             config: ProducerConfig::default(),
@@ -803,7 +802,6 @@ impl BlockProducer {
     }
 
     /// Create with custom config
-    /// Uses get_bootstrap_config() to automatically select devnet or default config
     pub fn with_config(
         config: ProducerConfig,
         validator_key: Option<ed25519_dalek::SigningKey>,

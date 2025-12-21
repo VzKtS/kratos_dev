@@ -2058,13 +2058,9 @@ impl StakeRequirementConfig {
 }
 
 impl BootstrapConfig {
-    /// Mainnet bootstrap configuration (canonical reference for ALL modes)
+    /// Bootstrap configuration (unified)
     /// Bootstrap period: Genesis → 1440 epochs = 60 days (SPEC v2.3)
     /// Exit conditions: 1440 epochs OR 50 validators OR stake threshold
-    ///
-    /// This is the SINGLE SOURCE OF TRUTH used by:
-    /// - mainnet, testnet, devnet: identical
-    /// - dev: same except epochs/validators for quick testing
     pub fn mainnet_config() -> Self {
         Self {
             genesis_epoch: 0,
