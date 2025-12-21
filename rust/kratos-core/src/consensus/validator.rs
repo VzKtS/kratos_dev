@@ -310,6 +310,44 @@ impl ValidatorSet {
         self.validators.get_mut(id)
     }
 
+    /// Ensure a bootstrap validator is registered and active.
+    /// If the validator already exists, update them to be a bootstrap validator.
+    /// If not, add them as a new bootstrap validator.
+    /// This is used during initial sync when we discover validators from blocks.
+    pub fn ensure_bootstrap_validator(&mut self, id: AccountId, block: BlockNumber) -> Result<(), ValidatorError> {
+        if let Some(existing) = self.validators.get_mut(&id) {
+            // Validator exists - ensure they're set up as bootstrap and active
+            if !existing.can_participate() {
+                existing.is_bootstrap_validator = true;
+                existing.status = ValidatorStatus::Active;
+                existing.reputation = 100;
+            }
+            Ok(())
+        } else {
+            // Validator doesn't exist - add them
+            let validator = ValidatorInfo::new_bootstrap(id, block);
+
+            // Try to register in role registry, ignore AlreadyRegistered error
+            if let Err(e) = self.role_registry.register_validator(
+                validator.id,
+                validator.stake,
+                validator.is_bootstrap_validator,
+                validator.registered_at,
+            ) {
+                match e {
+                    RoleRegistryError::AlreadyRegistered => {
+                        // Already in registry, just add to validators map
+                    }
+                    _ => return Err(ValidatorError::CannotParticipate),
+                }
+            }
+
+            self.total_stake = self.total_stake.saturating_add(validator.stake);
+            self.validators.insert(id, validator);
+            Ok(())
+        }
+    }
+
     /// Nombre de validateurs actifs (without block context - for backwards compatibility)
     pub fn active_count(&self) -> usize {
         self.validators

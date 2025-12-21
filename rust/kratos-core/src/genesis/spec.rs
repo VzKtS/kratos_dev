@@ -122,6 +122,59 @@ impl GenesisSpec {
 
         validator_set
     }
+
+    /// Apply genesis spec to state (for joining nodes that received genesis from network)
+    /// This initializes balances and validator accounts without creating the genesis block
+    pub fn apply_to_state(&self, state: &mut crate::storage::StateBackend) -> Result<ValidatorSet, String> {
+        use crate::types::AccountInfo;
+
+        // Initialize balances
+        for (account, balance) in &self.balances {
+            let mut account_info = AccountInfo::new();
+            account_info.free = *balance;
+            state.set_account(*account, account_info)
+                .map_err(|e| format!("Error setting account: {:?}", e))?;
+        }
+
+        // Initialize validators
+        let mut validator_set = ValidatorSet::new();
+
+        for validator in &self.validators {
+            if validator.is_bootstrap_validator {
+                // Bootstrap validator: create account with 0 balance if needed
+                let account_info = state
+                    .get_account(&validator.account)
+                    .map_err(|e| format!("Error getting account: {:?}", e))?
+                    .unwrap_or_else(AccountInfo::new);
+
+                state.set_account(validator.account, account_info)
+                    .map_err(|e| format!("Error setting account: {:?}", e))?;
+
+                let validator_info = ValidatorInfo::new_bootstrap(validator.account, 0);
+                validator_set.add_validator(validator_info)
+                    .map_err(|e| format!("Error adding validator: {:?}", e))?;
+            } else {
+                // Regular validator: reserve stake from balance
+                let mut account_info = state
+                    .get_account(&validator.account)
+                    .map_err(|e| format!("Error getting account: {:?}", e))?
+                    .ok_or_else(|| format!("Validator account {:?} not found", validator.account))?;
+
+                account_info
+                    .reserve(validator.stake)
+                    .map_err(|e| format!("Cannot reserve stake: {:?}", e))?;
+
+                state.set_account(validator.account, account_info)
+                    .map_err(|e| format!("Error setting account: {:?}", e))?;
+
+                let validator_info = ValidatorInfo::new(validator.account, validator.stake, 0);
+                validator_set.add_validator(validator_info)
+                    .map_err(|e| format!("Error adding validator: {:?}", e))?;
+            }
+        }
+
+        Ok(validator_set)
+    }
 }
 
 impl Default for GenesisSpec {

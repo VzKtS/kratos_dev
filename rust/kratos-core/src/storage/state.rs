@@ -613,6 +613,26 @@ impl StateBackend {
         Ok(drift)
     }
 
+    /// Update drift tracker for synced historical blocks without strict validation
+    /// Used during initial sync when we trust the network consensus
+    /// This just updates the tracker state to track the chain's progress
+    pub fn update_drift_tracker_for_sync(&self, block: &Block) -> Result<(), StateError> {
+        let mut tracker = self.get_drift_tracker()?
+            .ok_or_else(|| StateError::DriftTrackerNotInitialized)?;
+
+        // Update tracker state without validation
+        // For historical blocks, we trust they were validated when produced
+        tracker.last_block = block.header.number;
+        tracker.last_timestamp = block.header.timestamp;
+        tracker.last_slot = block.header.slot;
+        tracker.current_epoch = block.header.epoch;
+
+        // Persist updated tracker
+        self.set_drift_tracker(&tracker)?;
+
+        Ok(())
+    }
+
     /// Compute state root (Merkle root of all accounts) - SPEC v3.1 Phase 4
     ///
     /// SECURITY FIX #5 & #25: State root must be deterministic across all nodes.

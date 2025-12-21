@@ -1,7 +1,7 @@
 // Request-Response Protocol - Direct peer-to-peer message exchange
 // Principle: Request specific data from specific peers with timeout handling
 
-use crate::types::{Block, BlockNumber, Hash};
+use crate::types::{AccountId, Balance, Block, BlockNumber, Hash};
 use futures::prelude::*;
 use libp2p::request_response::{self, Codec, ProtocolSupport};
 use libp2p::StreamProtocol;
@@ -165,6 +165,23 @@ pub struct GenesisResponse {
 
     /// Protocol version
     pub protocol_version: u32,
+
+    /// Genesis validators (needed for state initialization)
+    /// This ensures joining nodes use the same validator set as the genesis node
+    #[serde(default)]
+    pub genesis_validators: Vec<GenesisValidatorInfo>,
+
+    /// Genesis balances (account -> balance mapping)
+    #[serde(default)]
+    pub genesis_balances: Vec<(AccountId, Balance)>,
+}
+
+/// Validator info for genesis response (simplified for network transmission)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenesisValidatorInfo {
+    pub account: AccountId,
+    pub stake: Balance,
+    pub is_bootstrap_validator: bool,
 }
 
 // =============================================================================
@@ -463,6 +480,26 @@ impl GenesisResponse {
             genesis_block,
             chain_name,
             protocol_version: 1,
+            genesis_validators: Vec::new(),
+            genesis_balances: Vec::new(),
+        })
+    }
+
+    /// Create a genesis response with validator info (for joining nodes)
+    pub fn with_validators(
+        genesis_hash: Hash,
+        genesis_block: Block,
+        chain_name: String,
+        validators: Vec<GenesisValidatorInfo>,
+        balances: Vec<(AccountId, Balance)>,
+    ) -> KratosResponse {
+        KratosResponse::Genesis(GenesisResponse {
+            genesis_hash,
+            genesis_block,
+            chain_name,
+            protocol_version: 1,
+            genesis_validators: validators,
+            genesis_balances: balances,
         })
     }
 }

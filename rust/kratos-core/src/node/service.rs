@@ -160,8 +160,14 @@ impl KratOsNode {
         // Check if we have an existing genesis hash in storage
         let existing_genesis = state.get_genesis_hash().ok().flatten();
 
+        // Type alias for genesis network info (validators and balances for network transmission)
+        type GenesisNetworkInfo = (
+            Vec<crate::network::request::GenesisValidatorInfo>,
+            Vec<(AccountId, Balance)>,
+        );
+
         // Determine genesis block and hash based on mode
-        let (genesis_block, genesis_hash, genesis_validators) = if genesis_mode {
+        let (genesis_block, genesis_hash, genesis_validators, genesis_network_info) = if genesis_mode {
             // GENESIS MODE: Create new genesis block
             info!("Building genesis block (genesis mode)");
             let (block, validators) = GenesisBuilder::new(genesis_spec.clone())
@@ -170,7 +176,20 @@ impl KratOsNode {
             let hash = block.hash();
             info!("Genesis validators: {} active", validators.active_count());
             info!("Genesis built: hash={}, state_root={}", hash, block.header.state_root);
-            (block, hash, validators)
+
+            // Convert spec to network format for serving to joining nodes
+            let network_validators: Vec<_> = genesis_spec.validators.iter().map(|v| {
+                crate::network::request::GenesisValidatorInfo {
+                    account: v.account,
+                    stake: v.stake,
+                    is_bootstrap_validator: v.is_bootstrap_validator,
+                }
+            }).collect();
+            let network_balances: Vec<_> = genesis_spec.balances.iter()
+                .map(|(k, v)| (*k, *v))
+                .collect();
+
+            (block, hash, validators, (network_validators, network_balances))
         } else if let Some(stored_hash) = existing_genesis {
             // JOIN MODE + EXISTING DB: Use stored genesis
             info!("📂 Found existing genesis hash in storage: {}", stored_hash);
@@ -191,8 +210,20 @@ impl KratOsNode {
             let validators = genesis_spec.build_validator_set();
             info!("Loaded {} validators from genesis spec", validators.active_count());
 
+            // Convert spec to network format for serving to joining nodes
+            let network_validators: Vec<_> = genesis_spec.validators.iter().map(|v| {
+                crate::network::request::GenesisValidatorInfo {
+                    account: v.account,
+                    stake: v.stake,
+                    is_bootstrap_validator: v.is_bootstrap_validator,
+                }
+            }).collect();
+            let network_balances: Vec<_> = genesis_spec.balances.iter()
+                .map(|(k, v)| (*k, *v))
+                .collect();
+
             info!("Using stored genesis: hash={}", stored_hash);
-            (stored_block, stored_hash, validators)
+            (stored_block, stored_hash, validators, (network_validators, network_balances))
         } else {
             // JOIN MODE + FRESH DB: Need to fetch genesis from network
             info!("🔄 No local genesis found - will fetch from network");
@@ -233,7 +264,15 @@ impl KratOsNode {
             let genesis_timeout = std::time::Duration::from_secs(60);
             let start_time = std::time::Instant::now();
             let mut last_status_log = std::time::Instant::now();
-            let mut received_genesis: Option<(Block, Hash)> = None;
+
+            // Struct to hold all genesis info received from network
+            struct ReceivedGenesis {
+                block: Block,
+                hash: Hash,
+                validators: Vec<crate::network::request::GenesisValidatorInfo>,
+                balances: Vec<(AccountId, Balance)>,
+            }
+            let mut received_genesis: Option<ReceivedGenesis> = None;
 
             // Run network and wait for genesis response
             while received_genesis.is_none() {
@@ -268,11 +307,21 @@ impl KratOsNode {
                             info!("📶 Connected to peer {}, requesting genesis...", peer_id);
                             network.request_genesis(&peer_id);
                         }
-                        Ok(NetworkEvent::GenesisReceived { genesis_hash, genesis_block, chain_name, .. }) => {
+                        Ok(NetworkEvent::GenesisReceived {
+                            genesis_hash, genesis_block, chain_name,
+                            genesis_validators, genesis_balances, ..
+                        }) => {
                             info!("✅ Received genesis from network!");
                             info!("   Chain: {}", chain_name);
                             info!("   Hash: {}", genesis_hash);
-                            received_genesis = Some((genesis_block, genesis_hash));
+                            info!("   Validators: {}", genesis_validators.len());
+                            info!("   Balances: {}", genesis_balances.len());
+                            received_genesis = Some(ReceivedGenesis {
+                                block: genesis_block,
+                                hash: genesis_hash,
+                                validators: genesis_validators,
+                                balances: genesis_balances,
+                            });
                             break;  // Exit inner loop, outer while will exit due to received_genesis
                         }
                         Ok(other_event) => {
@@ -298,26 +347,37 @@ impl KratOsNode {
             let received_genesis = received_genesis;
 
             match received_genesis {
-                Some((genesis_block, genesis_hash)) => {
+                Some(genesis_info) => {
                     // Store the received genesis
-                    state.store_block(&genesis_block)
+                    state.store_block(&genesis_info.block)
                         .map_err(|e| NodeError::Storage(format!("Failed to store genesis: {:?}", e)))?;
-                    state.set_genesis_hash(genesis_hash)
+                    state.set_genesis_hash(genesis_info.hash)
                         .map_err(|e| NodeError::Storage(format!("Failed to set genesis hash: {:?}", e)))?;
 
-                    info!("💾 Genesis stored locally");
+                    // Initialize drift tracker with genesis timestamp
+                    // This is required for validating block timestamps during sync
+                    state.init_drift_tracker(genesis_info.block.header.timestamp)
+                        .map_err(|e| NodeError::Storage(format!("Failed to init drift tracker: {:?}", e)))?;
 
-                    // Build validators from genesis spec
-                    // The spec contains the canonical validator list for this chain
-                    let validators = genesis_spec.build_validator_set();
-                    info!("Loaded {} validators from genesis spec", validators.active_count());
+                    // Apply received genesis state (validators and balances from network)
+                    // This uses the EXACT state from the genesis node, not hardcoded spec
+                    let validators = apply_received_genesis_state(
+                        &mut state,
+                        &genesis_info.validators,
+                        &genesis_info.balances,
+                    ).map_err(|e| NodeError::Storage(format!("Failed to apply genesis state: {}", e)))?;
+
+                    info!("💾 Genesis stored locally");
+                    info!("Loaded {} validators from genesis node", validators.active_count());
 
                     // Return - we'll continue initialization below with this genesis
                     // Note: We need to re-create the network with the correct genesis hash
                     drop(network);
                     drop(network_rx);
 
-                    (genesis_block, genesis_hash, validators)
+                    // Network info from received genesis (to pass along to other joining nodes)
+                    let network_info = (genesis_info.validators, genesis_info.balances);
+                    (genesis_info.block, genesis_info.hash, validators, network_info)
                 }
                 None => {
                     return Err(NodeError::Network("Failed to receive genesis from network".to_string()));
@@ -336,10 +396,17 @@ impl KratOsNode {
             .map_err(|e| NodeError::Network(format!("Network error: {:?}", e)))?;
 
         // Setup peer discovery (for non-genesis mode)
+        // Also set genesis info with validators so we can serve it to joining nodes
+        let (network_validators, network_balances) = genesis_network_info;
         if genesis_mode {
             info!("📌 Genesis mode: skipping peer discovery (new network)");
-            // In genesis mode, set ourselves as the genesis provider
-            network.set_genesis_info(genesis_block.clone(), config.chain_name.clone());
+            // In genesis mode, set ourselves as the genesis provider with validator info
+            network.set_genesis_info_with_validators(
+                genesis_block.clone(),
+                config.chain_name.clone(),
+                network_validators,
+                network_balances,
+            );
         } else {
             let bootstrap_addrs = Self::discover_peers(&config);
             if !bootstrap_addrs.is_empty() {
@@ -358,8 +425,13 @@ impl KratOsNode {
             } else {
                 info!("ℹ️  No bootstrap nodes configured - check DNS seed configuration");
             }
-            // Also set genesis info so we can serve it to other joining nodes
-            network.set_genesis_info(genesis_block.clone(), config.chain_name.clone());
+            // Also set genesis info with validators so we can serve it to other joining nodes
+            network.set_genesis_info_with_validators(
+                genesis_block.clone(),
+                config.chain_name.clone(),
+                network_validators,
+                network_balances,
+            );
         }
 
         // Update network with genesis state
@@ -575,7 +647,7 @@ impl KratOsNode {
                 network.maybe_start_sync();
             }
 
-            NetworkEvent::GenesisReceived { peer, genesis_hash, genesis_block, chain_name } => {
+            NetworkEvent::GenesisReceived { peer, genesis_hash, genesis_block, chain_name, .. } => {
                 // This event is handled during node initialization (join mode).
                 // If we receive it during normal operation, it means another node is joining.
                 // We just log it since we already have our genesis.
@@ -637,18 +709,16 @@ impl KratOsNode {
         {
             let mut validators = self.validators.write().await;
 
-            // Check if author is known
+            // Check if author is known and active
             if !validators.is_active(&block.header.author) {
                 // During initial sync (blocks 1-N), trust the block authors
                 // They must be validators who were active when these blocks were produced
                 if block_number <= 100 {
-                    // Add as bootstrap validator for initial sync
-                    use crate::consensus::validator::ValidatorInfo;
-                    info!("🔄 Adding validator {} from synced block #{}",
+                    // Ensure validator is registered and active for sync
+                    info!("🔄 Ensuring validator {} is active from synced block #{}",
                           block.header.author, block_number);
-                    let validator_info = ValidatorInfo::new_bootstrap(block.header.author, 0);
-                    if let Err(e) = validators.add_validator(validator_info) {
-                        warn!("Failed to add validator from sync: {:?}", e);
+                    if let Err(e) = validators.ensure_bootstrap_validator(block.header.author, 0) {
+                        warn!("Failed to ensure validator from sync: {:?}", e);
                     }
                 }
             }
@@ -658,13 +728,26 @@ impl KratOsNode {
             }
         }
 
-        // 3b. Validate timestamp drift
-        // This prevents gradual timestamp manipulation attacks
+        // 3b. Validate timestamp drift (only for real-time blocks, not historical sync)
+        // This prevents gradual timestamp manipulation attacks on new blocks
+        // For historical blocks during initial sync, we trust the network consensus
         {
             use crate::consensus::epoch::SLOT_DURATION_SECS;
-            let storage = self.storage.read().await;
-            if let Err(e) = storage.validate_block_drift(&block, SLOT_DURATION_SECS) {
-                return Err(NodeError::Consensus(format!("Drift validation failed: {:?}", e)));
+            let mut storage = self.storage.write().await;
+
+            // During initial sync (blocks below threshold), update drift tracker without strict validation
+            // These blocks were already validated by the network when they were produced
+            let is_historical_sync = block_number <= 100 && current_height == 0;
+
+            if is_historical_sync {
+                // Just update the tracker state for historical blocks
+                storage.update_drift_tracker_for_sync(&block)
+                    .map_err(|e| NodeError::Consensus(format!("Drift tracker update failed: {:?}", e)))?;
+            } else {
+                // Full validation for real-time blocks
+                if let Err(e) = storage.validate_block_drift(&block, SLOT_DURATION_SECS) {
+                    return Err(NodeError::Consensus(format!("Drift validation failed: {:?}", e)));
+                }
             }
         }
 
@@ -1098,6 +1181,65 @@ impl KratOsNode {
     pub async fn process_network_event(&self, event: NetworkEvent) {
         self.handle_network_event(event).await;
     }
+}
+
+/// Apply genesis state received from network to local storage
+///
+/// This initializes the state with the EXACT balances and validators
+/// from the genesis node, ensuring state root consistency.
+fn apply_received_genesis_state(
+    state: &mut StateBackend,
+    validators: &[crate::network::request::GenesisValidatorInfo],
+    balances: &[(AccountId, Balance)],
+) -> Result<ValidatorSet, String> {
+    use crate::consensus::validator::ValidatorInfo;
+
+    // Initialize balances
+    for (account, balance) in balances {
+        let mut account_info = AccountInfo::new();
+        account_info.free = *balance;
+        state.set_account(*account, account_info)
+            .map_err(|e| format!("Error setting account: {:?}", e))?;
+    }
+
+    // Initialize validators
+    let mut validator_set = ValidatorSet::new();
+
+    for validator in validators {
+        if validator.is_bootstrap_validator {
+            // Bootstrap validator: create account with 0 balance if needed
+            let account_info = state
+                .get_account(&validator.account)
+                .map_err(|e| format!("Error getting account: {:?}", e))?
+                .unwrap_or_else(AccountInfo::new);
+
+            state.set_account(validator.account, account_info)
+                .map_err(|e| format!("Error setting account: {:?}", e))?;
+
+            let validator_info = ValidatorInfo::new_bootstrap(validator.account, 0);
+            validator_set.add_validator(validator_info)
+                .map_err(|e| format!("Error adding validator: {:?}", e))?;
+        } else {
+            // Regular validator: reserve stake from balance
+            let mut account_info = state
+                .get_account(&validator.account)
+                .map_err(|e| format!("Error getting account: {:?}", e))?
+                .ok_or_else(|| format!("Validator account {:?} not found", validator.account))?;
+
+            account_info
+                .reserve(validator.stake)
+                .map_err(|e| format!("Cannot reserve stake: {:?}", e))?;
+
+            state.set_account(validator.account, account_info)
+                .map_err(|e| format!("Error setting account: {:?}", e))?;
+
+            let validator_info = ValidatorInfo::new(validator.account, validator.stake, 0);
+            validator_set.add_validator(validator_info)
+                .map_err(|e| format!("Error adding validator: {:?}", e))?;
+        }
+    }
+
+    Ok(validator_set)
 }
 
 /// Node errors

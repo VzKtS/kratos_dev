@@ -101,6 +101,10 @@ pub enum NetworkEvent {
         genesis_hash: Hash,
         genesis_block: Block,
         chain_name: String,
+        /// Genesis validators (for state initialization)
+        genesis_validators: Vec<super::request::GenesisValidatorInfo>,
+        /// Genesis balances (for state initialization)
+        genesis_balances: Vec<(crate::types::AccountId, crate::types::Balance)>,
     },
 }
 
@@ -156,6 +160,12 @@ pub struct NetworkService {
 
     /// Genesis block for serving to joining nodes
     genesis_block: Option<Block>,
+
+    /// Genesis validators (for serving to joining nodes)
+    genesis_validators: Vec<super::request::GenesisValidatorInfo>,
+
+    /// Genesis balances (for serving to joining nodes)
+    genesis_balances: Vec<(crate::types::AccountId, crate::types::Balance)>,
 
     /// Chain name
     chain_name: String,
@@ -282,6 +292,8 @@ impl NetworkService {
             local_peer_id,
             genesis_hash,
             genesis_block: None,
+            genesis_validators: Vec::new(),
+            genesis_balances: Vec::new(),
             chain_name: "kratos".to_string(),
             local_height: 0,
             local_hash: Hash::ZERO,
@@ -325,6 +337,21 @@ impl NetworkService {
         self.genesis_hash = genesis_block.hash();
         self.genesis_block = Some(genesis_block);
         self.chain_name = chain_name;
+    }
+
+    /// Set genesis info with validators for serving to joining nodes
+    pub fn set_genesis_info_with_validators(
+        &mut self,
+        genesis_block: Block,
+        chain_name: String,
+        validators: Vec<super::request::GenesisValidatorInfo>,
+        balances: Vec<(crate::types::AccountId, crate::types::Balance)>,
+    ) {
+        self.genesis_hash = genesis_block.hash();
+        self.genesis_block = Some(genesis_block);
+        self.chain_name = chain_name;
+        self.genesis_validators = validators;
+        self.genesis_balances = balances;
     }
 
     /// Request genesis info from a peer (for joining nodes)
@@ -724,9 +751,12 @@ impl NetworkService {
                         genesis_block: genesis_block.clone(),
                         chain_name: self.chain_name.clone(),
                         protocol_version: 1,
+                        genesis_validators: self.genesis_validators.clone(),
+                        genesis_balances: self.genesis_balances.clone(),
                     });
                     let _ = self.swarm.behaviour_mut().send_response(channel, response);
-                    info!("📤 Sent genesis info to peer {} (hash={})", peer, self.genesis_hash);
+                    info!("📤 Sent genesis info to peer {} (hash={}, validators={})",
+                          peer, self.genesis_hash, self.genesis_validators.len());
                 } else {
                     // We don't have genesis block yet - we shouldn't serve genesis requests
                     warn!("Cannot serve genesis to {}: no genesis block available (we may still be syncing)", peer);
@@ -848,6 +878,8 @@ impl NetworkService {
                     genesis_hash: genesis_res.genesis_hash,
                     genesis_block: genesis_res.genesis_block,
                     chain_name: genesis_res.chain_name,
+                    genesis_validators: genesis_res.genesis_validators,
+                    genesis_balances: genesis_res.genesis_balances,
                 });
             }
         }
