@@ -50,7 +50,7 @@ pub const OFFICIAL_DNS_SEEDS: &[&str] = &[
 ///
 /// Format: /ip4/<IP>/tcp/<PORT>/p2p/<PEER_ID>
 pub const FALLBACK_BOOTNODES: &[&str] = &[
-    "/ip4/45.8.132.252/tcp/30333/p2p/12D3KooWAiEmjd2mEHoXKgEBfaXkcXiv4dDiyecowZQ47fZRztfY",
+    "/ip4/45.8.132.252/tcp/30333/p2p/12D3KooWEeXJRXqC1XANbsKAzibKisFNitZhbi2RArciXuEHJGcx",
 ];
 
 // =============================================================================

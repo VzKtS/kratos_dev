@@ -254,7 +254,7 @@ impl NetworkService {
 
         // Create swarm
         let swarm = SwarmBuilder::with_existing_identity(local_key)
-            .with_async_std()
+            .with_tokio()
             .with_tcp(
                 libp2p::tcp::Config::default(),
                 libp2p::noise::Config::new,
@@ -673,8 +673,13 @@ impl NetworkService {
             }
             KratosRequest::Status(status_req) => {
                 // Validate genesis hash
-                if status_req.genesis_hash != self.genesis_hash && self.genesis_hash != Hash::ZERO {
-                    warn!("Peer {} has different genesis hash!", peer);
+                // Allow peers with Hash::ZERO - they are still syncing/requesting genesis
+                if status_req.genesis_hash != self.genesis_hash
+                    && self.genesis_hash != Hash::ZERO
+                    && status_req.genesis_hash != Hash::ZERO
+                {
+                    warn!("Peer {} has different genesis hash (theirs: {}, ours: {})!",
+                          peer, status_req.genesis_hash, self.genesis_hash);
                     self.peer_manager.ban_peer(&peer, "Different genesis");
                     return;
                 }

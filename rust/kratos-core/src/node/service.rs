@@ -340,7 +340,17 @@ impl KratOsNode {
             let bootstrap_addrs = Self::discover_peers(&config);
             if !bootstrap_addrs.is_empty() {
                 info!("🌐 Total bootstrap nodes: {}", bootstrap_addrs.len());
-                network.add_bootstrap_nodes(bootstrap_addrs);
+                network.add_bootstrap_nodes(bootstrap_addrs.clone());
+
+                // IMPORTANT: After recreating network with genesis hash, we must dial bootnodes
+                // add_bootstrap_nodes only adds addresses, it doesn't connect
+                info!("📞 Dialing bootstrap nodes to reconnect...");
+                for (peer_id, addr) in &bootstrap_addrs {
+                    debug!("   Dialing {} at {}", peer_id, addr);
+                    if let Err(e) = network.dial(addr.clone()) {
+                        warn!("Failed to dial {}: {:?}", peer_id, e);
+                    }
+                }
             } else {
                 info!("ℹ️  No bootstrap nodes configured - check DNS seed configuration");
             }
