@@ -1,8 +1,8 @@
 # KratOs Protocol Synthesis
 
-**Version:** 1.10
+**Version:** 1.11
 **Status:** Normative
-**Last Updated:** 2025-12-19
+**Last Updated:** 2025-12-21
 
 ---
 

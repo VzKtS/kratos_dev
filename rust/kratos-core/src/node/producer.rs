@@ -1397,6 +1397,110 @@ impl BlockProducer {
 }
 
 // =============================================================================
+// BLOCK REWARD APPLICATION (for sync/import)
+// =============================================================================
+
+/// Apply block rewards during block import (for syncing nodes)
+/// This replicates the reward logic from produce_block for imported blocks
+///
+/// Arguments:
+/// - state: mutable state backend to credit rewards
+/// - author: block producer account
+/// - epoch: block epoch (for bootstrap/post-bootstrap inflation rate)
+/// - total_fees: sum of fees from all transactions in block
+///
+/// Returns: total reward credited to validator (block reward + fees share)
+pub fn apply_block_rewards_for_import(
+    state: &mut StateBackend,
+    author: AccountId,
+    epoch: EpochNumber,
+    total_fees: Balance,
+) -> Result<Balance, String> {
+    // Get bootstrap config to check if we're in bootstrap era
+    let bootstrap_config = get_bootstrap_config();
+    let is_bootstrap = bootstrap_config.is_bootstrap(epoch);
+
+    // Get default metrics for reward calculation
+    let metrics = NetworkMetrics {
+        total_supply: 1_000_000_000 * KRAT, // 1B KRAT
+        total_staked: 100_000_000 * KRAT,   // 100M KRAT (10%)
+        active_validators: 100,
+        active_users: 10_000,
+        transactions_count: 100_000,
+    };
+
+    // Calculate base block reward (same logic as BlockProducer::calculate_block_reward)
+    let annual_emission = if is_bootstrap {
+        // Bootstrap era: Use fixed 6.5% inflation (SPEC v2)
+        let bootstrap_inflation = bootstrap_config.target_inflation;
+        (metrics.total_supply as f64 * bootstrap_inflation) as Balance
+    } else {
+        // Post-bootstrap: Use adaptive inflation (simplified for import)
+        let inflation_config = InflationConfig::default();
+        let calculator = InflationCalculator::new(inflation_config);
+        calculator.calculate_annual_emission(&metrics)
+    };
+
+    // Convert to per-block reward
+    let blocks_per_year = EPOCHS_PER_YEAR * SLOTS_PER_EPOCH;
+    let block_reward = (annual_emission / (blocks_per_year as u128)).max(1 * KRAT);
+
+    // Get validator's VC for bonus calculation
+    let validator_vc = state.get_total_vc(&author).unwrap_or(0);
+
+    // Apply VC bonus: FinalReward = BaseReward × (1 + ln(1 + VC) / 10)
+    let block_reward_with_bonus = if validator_vc > 0 {
+        let multiplier = 1.0 + (1.0 + validator_vc as f64).ln() / 10.0;
+        (block_reward as f64 * multiplier) as Balance
+    } else {
+        block_reward
+    };
+
+    // Distribute fees: 60% validator, 30% burn, 10% treasury
+    let fee_distribution = FeeDistribution::default_distribution();
+    let (fee_to_validator, _fee_burn, fee_to_treasury) = fee_distribution.distribute(total_fees);
+
+    // Total validator reward = 100% block reward + 60% fees
+    let total_validator_reward = block_reward_with_bonus.saturating_add(fee_to_validator);
+
+    // Credit validator
+    if total_validator_reward > 0 {
+        let mut validator_account = state
+            .get_account(&author)
+            .map_err(|e| format!("Get validator account: {:?}", e))?
+            .unwrap_or(AccountInfo::new());
+
+        validator_account.free = validator_account.free.saturating_add(total_validator_reward);
+
+        state
+            .set_account(author, validator_account)
+            .map_err(|e| format!("Set validator account: {:?}", e))?;
+    }
+
+    // Credit treasury (10% of fees only)
+    if fee_to_treasury > 0 {
+        let treasury_account_id = AccountId::from_bytes(TREASURY_ACCOUNT);
+        let mut treasury_account = state
+            .get_account(&treasury_account_id)
+            .map_err(|e| format!("Get treasury account: {:?}", e))?
+            .unwrap_or(AccountInfo::new());
+
+        treasury_account.free = treasury_account.free.saturating_add(fee_to_treasury);
+
+        state
+            .set_account(treasury_account_id, treasury_account)
+            .map_err(|e| format!("Set treasury account: {:?}", e))?;
+    }
+
+    debug!(
+        "Import rewards: author={}, block_reward={} (with VC bonus from {} VC), fee_share={}, total={}",
+        author, block_reward_with_bonus, validator_vc, fee_to_validator, total_validator_reward
+    );
+
+    Ok(total_validator_reward)
+}
+
+// =============================================================================
 // ERRORS
 // =============================================================================
 

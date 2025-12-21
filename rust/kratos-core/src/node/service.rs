@@ -13,7 +13,7 @@ use crate::network::dns_seeds::{DnsSeedResolver, parse_bootnode};
 use crate::network::service::{BlockProvider, NetworkEvent, NetworkService, SharedBlockProvider};
 use crate::network::sync::SyncState;
 use crate::node::mempool::TransactionPool;
-use crate::node::producer::{TransactionExecutor, BlockValidator, ValidationError};
+use crate::node::producer::{TransactionExecutor, BlockValidator, ValidationError, apply_block_rewards_for_import};
 use crate::storage::{db::Database, state::StateBackend};
 use crate::types::*;
 use std::path::{Path, PathBuf};
@@ -733,7 +733,7 @@ impl KratOsNode {
         // For historical blocks during initial sync, we trust the network consensus
         {
             use crate::consensus::epoch::SLOT_DURATION_SECS;
-            let mut storage = self.storage.write().await;
+            let storage = self.storage.write().await;
 
             // During initial sync (blocks below threshold), update drift tracker without strict validation
             // These blocks were already validated by the network when they were produced
@@ -751,11 +751,12 @@ impl KratOsNode {
             }
         }
 
-        // 4. Execute all transactions and validate state root
+        // 4. Execute all transactions, apply rewards, and validate state root
         {
             let mut storage = self.storage.write().await;
 
-            // Execute each transaction
+            // Execute each transaction and collect fees
+            let mut total_fees: Balance = 0;
             for (idx, tx) in block.body.transactions.iter().enumerate() {
                 let result = TransactionExecutor::execute(&mut storage, tx, block_number);
 
@@ -769,9 +770,22 @@ impl KratOsNode {
                         idx, result.error
                     )));
                 }
+                total_fees = total_fees.saturating_add(result.fee_paid);
             }
 
-            // Compute state root after executing all transactions
+            // Apply block rewards (same as during production)
+            // This credits the block author with block reward + fee share
+            if let Err(e) = apply_block_rewards_for_import(
+                &mut storage,
+                block.header.author,
+                block.header.epoch,
+                total_fees,
+            ) {
+                error!("Failed to apply block rewards for block #{}: {}", block_number, e);
+                return Err(NodeError::Consensus(format!("Block reward application failed: {}", e)));
+            }
+
+            // Compute state root after executing all transactions and applying rewards
             let chain_id = ChainId(0); // TODO: Get from config
             let computed_state_root = storage.compute_state_root(block_number, chain_id);
 
@@ -1238,6 +1252,15 @@ fn apply_received_genesis_state(
                 .map_err(|e| format!("Error adding validator: {:?}", e))?;
         }
     }
+
+    // CRITICAL: Compute and store the state root for block 0
+    // This MUST match what the genesis node computed
+    let chain_id = crate::types::ChainId(0);
+    let state_root = state.compute_state_root(0, chain_id);
+    state.store_state_root(0, state_root)
+        .map_err(|e| format!("Error storing state root: {:?}", e))?;
+
+    info!("📊 Genesis state root computed and stored: {}", state_root.root);
 
     Ok(validator_set)
 }

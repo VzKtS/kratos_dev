@@ -450,6 +450,67 @@ fn load_or_generate_keypair(data_dir: Option<&PathBuf>) -> Result<Keypair, Error
 - File permissions: 0600 (Unix) for security
 - No data directory: ephemeral mode (PeerId changes each restart)
 
+### Block Synchronization
+
+**Location**: `src/network/sync.rs`, `src/node/service.rs`
+
+When a node joins the network, it syncs historical blocks from peers:
+
+```
+Joining Node                         Genesis Node
+     │                                     │
+     │ ──── GenesisRequest ──────────────► │
+     │ ◄─── GenesisResponse ───────────────│
+     │      (block, validators, balances)  │
+     │                                     │
+     │ ──── SyncRequest(from=1) ─────────► │
+     │ ◄─── SyncResponse(blocks 1-N) ──────│
+     │                                     │
+     │    [Import each block with rewards] │
+     │                                     │
+```
+
+**Block Import Process** (for synced blocks):
+
+```rust
+// In node/service.rs - import_block()
+
+async fn import_block(&self, block: Block) -> Result<(), NodeError> {
+    // 1. Validate block header and signature
+    BlockValidator::validate(&block, parent, &validators)?;
+
+    // 2. Execute all transactions
+    let mut total_fees = 0;
+    for tx in &block.body.transactions {
+        let result = TransactionExecutor::execute(&mut storage, tx, block_number);
+        total_fees += result.fee_paid;
+    }
+
+    // 3. CRITICAL: Apply block rewards (same as during production)
+    apply_block_rewards_for_import(
+        &mut storage,
+        block.header.author,  // Block producer
+        block.header.epoch,   // For inflation calculation
+        total_fees,           // Fee distribution
+    )?;
+
+    // 4. Verify state root matches
+    let computed = storage.compute_state_root(block_number, chain_id);
+    if computed.root != block.header.state_root {
+        return Err(NodeError::StateRootMismatch);
+    }
+
+    // 5. Store block and update chain state
+    storage.store_block(&block)?;
+}
+```
+
+**Key Points:**
+- Block rewards MUST be applied during import (not just during production)
+- Reward calculation uses the same logic: `BlockReward + 60% fees` to validator
+- State root is computed AFTER applying rewards
+- Genesis state includes validators and balances from the genesis node
+
 ---
 
 ## Storage Layer
@@ -814,7 +875,7 @@ Defines initial state:
 ---
 
 **Implementation Status**: Complete
-**Last Updated**: 2025-12-19
+**Last Updated**: 2025-12-21
 **Runtime**: tokio async
 **Framework**: Native Rust (no Substrate)
 **Specification Version**: Unified (see [KRATOS_SYNTHESIS.md](KRATOS_SYNTHESIS.md))
