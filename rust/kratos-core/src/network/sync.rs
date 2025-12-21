@@ -77,17 +77,21 @@ impl SyncManager {
     fn update_state(&mut self) {
         let gap = self.best_known_height.saturating_sub(self.local_height);
 
+        // For initial sync (local_height == 0), always sync if there's any gap
+        // For ongoing operation, use threshold to avoid syncing for minor gaps
+        let effective_threshold = if self.local_height == 0 { 0 } else { self.sync_threshold };
+
         self.state = if gap == 0 {
             SyncState::Synced
         } else if gap > 1000 {
             SyncState::FarBehind
-        } else if gap > self.sync_threshold {
+        } else if gap > effective_threshold {
             SyncState::Downloading
         } else {
             SyncState::Synced
         };
 
-        debug!("Sync state: {:?}, gap: {}", self.state, gap);
+        debug!("Sync state: {:?}, gap: {}, threshold: {}", self.state, gap, effective_threshold);
     }
 
     /// Vérifie si on doit synchroniser

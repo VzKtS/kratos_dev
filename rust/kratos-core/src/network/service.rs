@@ -544,9 +544,25 @@ impl NetworkService {
             Ok(NetworkMessage::NewBlock(block)) => {
                 debug!("Received new block #{} from {}", block.header.number, from);
 
-                // Update peer height
+                // Update peer height (always, for sync tracking)
                 self.peer_manager.update_peer_height(from, block.header.number);
                 self.sync_manager.peer_height_update(block.header.number);
+
+                // During initial sync, defer gossip blocks if they're too far ahead
+                // This prevents "block number mismatch" errors when we receive
+                // new blocks before the sync protocol delivers historical blocks
+                if self.sync_manager.should_sync() {
+                    let expected = self.local_height + 1;
+                    if block.header.number > expected {
+                        debug!(
+                            "⏸️ Deferring gossip block #{} during sync (expected: #{})",
+                            block.header.number, expected
+                        );
+                        // Trigger sync to catch up
+                        self.maybe_start_sync();
+                        return;
+                    }
+                }
 
                 let _ = self.event_tx.send(NetworkEvent::BlockReceived {
                     block,
@@ -798,11 +814,18 @@ impl NetworkService {
                 });
 
                 // Check if we need to sync
-                if status_res.best_block > self.local_height + 10 {
+                // For initial sync (local_height == 0), sync immediately if peer is ahead
+                // For normal operation, use threshold of 10 blocks
+                let sync_threshold = if self.local_height == 0 { 0 } else { 10 };
+                if status_res.best_block > self.local_height + sync_threshold {
+                    info!("🔄 Sync triggered: local={}, network={}, threshold={}",
+                        self.local_height, status_res.best_block, sync_threshold);
                     let _ = self.event_tx.send(NetworkEvent::SyncNeeded {
                         local_height: self.local_height,
                         network_height: status_res.best_block,
                     });
+                    // Start sync immediately
+                    self.maybe_start_sync();
                 }
             }
             KratosResponse::Genesis(genesis_res) => {
