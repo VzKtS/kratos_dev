@@ -186,8 +186,10 @@ impl KratOsNode {
                 )));
             }
 
-            // Build validators from stored genesis state
-            let validators = ValidatorSet::default(); // Will be loaded from storage
+            // Build validators from genesis spec
+            // The spec contains the canonical validator list for this chain
+            let validators = genesis_spec.build_validator_set();
+            info!("Loaded {} validators from genesis spec", validators.active_count());
 
             info!("Using stored genesis: hash={}", stored_hash);
             (stored_block, stored_hash, validators)
@@ -305,8 +307,10 @@ impl KratOsNode {
 
                     info!("💾 Genesis stored locally");
 
-                    // Initialize validators (empty for now, will sync from state)
-                    let validators = ValidatorSet::default();
+                    // Build validators from genesis spec
+                    // The spec contains the canonical validator list for this chain
+                    let validators = genesis_spec.build_validator_set();
+                    info!("Loaded {} validators from genesis spec", validators.active_count());
 
                     // Return - we'll continue initialization below with this genesis
                     // Note: We need to re-create the network with the correct genesis hash

@@ -103,6 +103,25 @@ impl GenesisSpec {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(path, content)
     }
+
+    /// Build ValidatorSet from genesis spec without modifying state
+    /// Used when joining a network (we receive genesis block but need validators)
+    pub fn build_validator_set(&self) -> ValidatorSet {
+        let mut validator_set = ValidatorSet::new();
+
+        for validator in &self.validators {
+            let validator_info = if validator.is_bootstrap_validator {
+                ValidatorInfo::new_bootstrap(validator.account, 0)
+            } else {
+                ValidatorInfo::new(validator.account, validator.stake, 0)
+            };
+
+            // Ignore errors - in join mode we trust the genesis spec
+            let _ = validator_set.add_validator(validator_info);
+        }
+
+        validator_set
+    }
 }
 
 impl Default for GenesisSpec {
