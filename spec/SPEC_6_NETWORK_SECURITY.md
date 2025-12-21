@@ -409,7 +409,67 @@ pub const DEFAULT_P2P_PORT: u16 = 30333;
 
 ---
 
-## 13. Related Specifications
+## 13. Network Identity Persistence
+
+### 13.1 Overview
+
+Each KratOs node has a unique **PeerId** derived from an Ed25519 keypair. This identity is persisted to disk to ensure stable network topology across restarts.
+
+### 13.2 Identity Storage
+
+| Item | Location |
+|------|----------|
+| Network key file | `<data_dir>/network/network_key` |
+| Key format | Ed25519 secret key (32 bytes) |
+| Permissions | 0600 (Unix) |
+
+### 13.3 Behavior
+
+| Scenario | Action |
+|----------|--------|
+| First startup | Generate new keypair, save to disk |
+| Subsequent startups | Load existing keypair from disk |
+| No data directory | Use ephemeral keypair (warning logged) |
+
+### 13.4 Implementation
+
+```rust
+// In network/service.rs
+
+const NETWORK_KEY_FILENAME: &str = "network_key";
+
+fn load_or_generate_keypair(data_dir: Option<&PathBuf>) -> Result<Keypair, Error> {
+    if let Some(dir) = data_dir {
+        let key_path = dir.join("network").join(NETWORK_KEY_FILENAME);
+
+        if key_path.exists() {
+            // Load existing keypair
+            let key_bytes = std::fs::read(&key_path)?;
+            Keypair::ed25519_from_bytes(key_bytes)
+        } else {
+            // Generate and save new keypair
+            let keypair = Keypair::generate_ed25519();
+            std::fs::write(&key_path, keypair.secret())?;
+            Ok(keypair)
+        }
+    } else {
+        // Ephemeral mode
+        Ok(Keypair::generate_ed25519())
+    }
+}
+```
+
+### 13.5 Security Considerations
+
+| Consideration | Implementation |
+|---------------|----------------|
+| Key protection | File permissions set to 0600 |
+| Key backup | Users should backup `network_key` file |
+| Key rotation | Delete file to generate new identity |
+
+---
+
+## 14. Related Specifications
 
 - **SPEC 1:** Tokenomics - Inflation adjustments per state
 - **SPEC 2:** Validator Credits - VC multipliers during bootstrap

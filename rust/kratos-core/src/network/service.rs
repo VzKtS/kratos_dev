@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use libp2p::{
     gossipsub::Event as GossipsubEvent,
+    identity::Keypair,
     kad::Event as KadEvent,
     request_response::{self, Event as ReqResEvent, Message as ReqResMessage},
     swarm::SwarmEvent,
@@ -26,6 +27,7 @@ use libp2p::{
 };
 use std::collections::HashMap;
 use std::error::Error;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -168,12 +170,63 @@ pub struct NetworkService {
     block_provider: Option<SharedBlockProvider>,
 }
 
+// =============================================================================
+// NETWORK IDENTITY PERSISTENCE
+// =============================================================================
+
+/// Default filename for network identity key
+const NETWORK_KEY_FILENAME: &str = "network_key";
+
+/// Load or generate a persistent network identity keypair
+///
+/// The keypair is stored in the data directory to ensure the PeerId
+/// remains stable across node restarts.
+fn load_or_generate_keypair(data_dir: Option<&PathBuf>) -> Result<Keypair, Box<dyn Error>> {
+    if let Some(dir) = data_dir {
+        let network_dir = dir.join("network");
+        let key_path = network_dir.join(NETWORK_KEY_FILENAME);
+
+        if key_path.exists() {
+            // Load existing keypair
+            let key_bytes = std::fs::read(&key_path)?;
+            let keypair = Keypair::ed25519_from_bytes(key_bytes.clone())
+                .map_err(|e| format!("Failed to decode network key: {}", e))?;
+            info!("🔑 Loaded network identity from {:?}", key_path);
+            Ok(keypair)
+        } else {
+            // Generate and save new keypair
+            std::fs::create_dir_all(&network_dir)?;
+            let keypair = Keypair::generate_ed25519();
+
+            // Extract the secret key bytes for ed25519
+            if let Some(ed25519_keypair) = keypair.clone().try_into_ed25519().ok() {
+                let secret_bytes = ed25519_keypair.secret().as_ref().to_vec();
+                std::fs::write(&key_path, &secret_bytes)?;
+
+                // Set restrictive permissions on Unix
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))?;
+                }
+
+                info!("🔑 Generated new network identity, saved to {:?}", key_path);
+            }
+            Ok(keypair)
+        }
+    } else {
+        // No data directory - generate ephemeral keypair
+        warn!("⚠️ No data directory specified - using ephemeral network identity (PeerId will change on restart)");
+        Ok(Keypair::generate_ed25519())
+    }
+}
+
 impl NetworkService {
     /// Create a new network service
     pub async fn new(
         listen_addr: &str,
     ) -> Result<(Self, mpsc::UnboundedReceiver<NetworkEvent>), Box<dyn Error>> {
-        Self::with_genesis(listen_addr, Hash::ZERO).await
+        Self::with_genesis_and_datadir(listen_addr, Hash::ZERO, None).await
     }
 
     /// Create a new network service with genesis hash
@@ -181,8 +234,17 @@ impl NetworkService {
         listen_addr: &str,
         genesis_hash: Hash,
     ) -> Result<(Self, mpsc::UnboundedReceiver<NetworkEvent>), Box<dyn Error>> {
-        // Generate keypair for node identity
-        let local_key = libp2p::identity::Keypair::generate_ed25519();
+        Self::with_genesis_and_datadir(listen_addr, genesis_hash, None).await
+    }
+
+    /// Create a new network service with genesis hash and data directory for persistent identity
+    pub async fn with_genesis_and_datadir(
+        listen_addr: &str,
+        genesis_hash: Hash,
+        data_dir: Option<PathBuf>,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<NetworkEvent>), Box<dyn Error>> {
+        // Load or generate keypair for node identity (persistent if data_dir is provided)
+        let local_key = load_or_generate_keypair(data_dir.as_ref())?;
         let local_peer_id = PeerId::from(local_key.public());
 
         info!("Local peer id: {}", local_peer_id);

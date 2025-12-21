@@ -197,7 +197,11 @@ impl KratOsNode {
 
             // First, initialize network to connect to peers
             let listen_addr = format!("/ip4/0.0.0.0/tcp/{}", config.network.listen_port);
-            let (mut network, mut network_rx) = NetworkService::with_genesis(&listen_addr, Hash::ZERO)
+            let (mut network, mut network_rx) = NetworkService::with_genesis_and_datadir(
+                &listen_addr,
+                Hash::ZERO,
+                Some(data_path.to_path_buf()),
+            )
                 .await
                 .map_err(|e| NodeError::Network(format!("Network error: {:?}", e)))?;
 
@@ -317,9 +321,13 @@ impl KratOsNode {
             }
         };
 
-        // Initialize network with correct genesis hash
+        // Initialize network with correct genesis hash and persistent identity
         let listen_addr = format!("/ip4/0.0.0.0/tcp/{}", config.network.listen_port);
-        let (mut network, network_rx) = NetworkService::with_genesis(&listen_addr, genesis_hash)
+        let (mut network, network_rx) = NetworkService::with_genesis_and_datadir(
+            &listen_addr,
+            genesis_hash,
+            Some(data_path.to_path_buf()),
+        )
             .await
             .map_err(|e| NodeError::Network(format!("Network error: {:?}", e)))?;
 

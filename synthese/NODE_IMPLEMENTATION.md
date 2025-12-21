@@ -416,6 +416,40 @@ network.add_bootstrap_nodes(bootstrap_addrs);
 3. Submit PR to add seed to official list
 4. Pass community review for independence
 
+### Network Identity Persistence
+
+**Location**: `src/network/service.rs`
+
+Each node has a persistent PeerId derived from an Ed25519 keypair stored on disk:
+
+```rust
+// Network identity is saved to: <data_dir>/network/network_key
+
+fn load_or_generate_keypair(data_dir: Option<&PathBuf>) -> Result<Keypair, Error> {
+    if let Some(dir) = data_dir {
+        let key_path = dir.join("network").join("network_key");
+
+        if key_path.exists() {
+            // Load existing - PeerId stays the same
+            Keypair::ed25519_from_bytes(std::fs::read(&key_path)?)
+        } else {
+            // Generate new and save
+            let keypair = Keypair::generate_ed25519();
+            std::fs::write(&key_path, keypair.secret())?;
+            Ok(keypair)
+        }
+    } else {
+        Ok(Keypair::generate_ed25519())  // Ephemeral
+    }
+}
+```
+
+**Key Points:**
+- First startup: generates new keypair, saves to `<data_dir>/network/network_key`
+- Subsequent startups: loads existing keypair, PeerId remains stable
+- File permissions: 0600 (Unix) for security
+- No data directory: ephemeral mode (PeerId changes each restart)
+
 ---
 
 ## Storage Layer
