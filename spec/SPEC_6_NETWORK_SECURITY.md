@@ -1,8 +1,15 @@
 # SPEC 6: Network Security States
 
-**Version:** 1.0
+**Version:** 1.2
 **Status:** Normative
-**Last Updated:** 2025-12-19
+**Last Updated:** 2025-12-21
+
+### Changelog
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.2 | 2025-12-21 | Added §16 RPC Channel Architecture |
+| 1.1 | 2025-12-21 | Added §12-15 (DNS Seeds, Identity, Sync, Genesis) |
+| 1.0 | 2025-12-19 | Initial specification |
 
 ---
 
@@ -469,8 +476,174 @@ fn load_or_generate_keypair(data_dir: Option<&PathBuf>) -> Result<Keypair, Error
 
 ---
 
-## 14. Related Specifications
+## 14. Sync Protocol Security
+
+### 14.1 Block Buffering
+
+Nodes buffer out-of-order blocks during synchronization to prevent false-positive peer banning:
+
+```
+┌─────────────────────────────────────────────┐
+│              SyncManager                     │
+├─────────────────────────────────────────────┤
+│ pending_blocks: HashMap<BlockNumber, Block> │
+│ download_queue: VecDeque<BlockNumber>       │
+│ batch_size: 50                              │
+└─────────────────────────────────────────────┘
+```
+
+### 14.2 Buffering Rules
+
+| Block Number | Local Height | Action |
+|--------------|--------------|--------|
+| <= local | Any | Ignore (duplicate/stale) |
+| local + 1 | Any | Import immediately |
+| > local + 1 | <= best_known + 100 | Buffer |
+| > best_known + 100 | Any | Reject (too far ahead) |
+
+### 14.3 Buffer Drain
+
+After each successful import, buffered blocks are processed:
+
+```rust
+loop {
+    let next = buffer.get(local_height + 1);
+    match next {
+        Some(block) => import(block),
+        None => break,
+    }
+}
+```
+
+### 14.4 Peer Trust Levels
+
+| Behavior | Trust Impact |
+|----------|--------------|
+| Valid blocks | Increase |
+| Out-of-order blocks | Neutral |
+| Invalid signature | Ban immediately |
+| Invalid parent hash | Ban immediately |
+| Timeout | Decrease |
+
+---
+
+## 15. Genesis Timestamp Security
+
+### 15.1 Canonical Time Reference
+
+The genesis block timestamp serves as the canonical time reference for all slot calculations:
+
+```
+genesis_timestamp = genesis_block.header.timestamp
+slot_for_block = ((block.timestamp - genesis_timestamp) / 6) % 600
+```
+
+### 15.2 Why This Matters
+
+Without a canonical genesis timestamp:
+- Nodes using wall-clock time would reject valid blocks
+- Time drift between nodes would cause chain splits
+- Syncing nodes would fail with "TimestampSlotMismatch"
+
+### 15.3 Genesis Time Propagation
+
+```
+Genesis Node
+    │ creates genesis block with timestamp T
+    ▼
+GenesisResponse
+    │ includes genesis block
+    ▼
+Joining Node
+    │ extracts T from genesis.header.timestamp
+    │ stores in GenesisConfig.genesis_timestamp
+    ▼
+All Slot Calculations
+    │ use T as reference
+```
+
+---
+
+## 16. RPC Channel Architecture
+
+### 16.1 Design Rationale
+
+The KratOs node uses a **channel-based RPC pattern** because libp2p's `Swarm` is not `Sync`. The HTTP server cannot directly access network/state components that require the swarm.
+
+### 16.2 Architecture
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                       HTTP Server                             │
+│  (Receives JSON-RPC requests)                                │
+├──────────────────────────────────────────────────────────────┤
+│                                                               │
+│  route_request() ─────────────► RpcCall Variant              │
+│       │                              │                        │
+│       │                              ▼                        │
+│       │                    mpsc::Sender<RpcCall>              │
+│       │                              │                        │
+│       │                              │                        │
+│       ▼                              │                        │
+│  oneshot::Receiver ◄─────────────────┘                       │
+│       │                                                       │
+│       ▼                                                       │
+│  JsonRpcResponse                                              │
+└──────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────┐
+│                    CLI Runner Event Loop                      │
+│  (Owns Swarm and Node)                                       │
+├──────────────────────────────────────────────────────────────┤
+│                                                               │
+│  mpsc::Receiver<RpcCall> ─────► handle_rpc_call()            │
+│                                       │                       │
+│                                       ▼                       │
+│                             Match on RpcCall variant         │
+│                                       │                       │
+│                                       ▼                       │
+│                              Execute node operation          │
+│                                       │                       │
+│                                       ▼                       │
+│                             oneshot::Sender::send(result)    │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 16.3 RpcCall Enum
+
+| Variant | Description |
+|---------|-------------|
+| `StateGetAccount` | Query account balance/nonce |
+| `StateGetNonce` | Query account nonce only |
+| `ChainGetInfo` | Get chain height/epoch info |
+| `AuthorSubmitTransaction` | Submit signed transaction |
+| `ValidatorGetEarlyVotingStatus` | Get bootstrap voting status |
+| `ValidatorGetPendingCandidates` | List validator candidates |
+| `ValidatorGetCandidateVotes` | Get votes for candidate |
+| `ValidatorCanVote` | Check if account can vote |
+
+### 16.4 Adding New RPC Methods
+
+To add a new RPC method:
+
+1. **Add variant to `RpcCall` enum** (`rpc/server.rs`)
+2. **Add route in `route_request()`** (`rpc/server.rs`)
+3. **Add handler function** (`rpc/server.rs`)
+4. **Add match arm in `handle_rpc_call()`** (`cli/runner.rs`)
+
+### 16.5 Source Files
+
+| File | Contents |
+|------|----------|
+| `rpc/server.rs` | RpcCall enum, route_request(), handlers |
+| `cli/runner.rs` | handle_rpc_call() match arms |
+
+---
+
+## 17. Related Specifications
 
 - **SPEC 1:** Tokenomics - Inflation adjustments per state
 - **SPEC 2:** Validator Credits - VC multipliers during bootstrap
+- **SPEC 3:** Consensus - Block synchronization and validation
 - **SPEC 5:** Governance - Governance freeze in restricted
+- **SPEC 8:** Wallet - Client-side RPC usage

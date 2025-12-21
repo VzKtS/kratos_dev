@@ -361,10 +361,12 @@ impl KratOsNode {
 
                     // Apply received genesis state (validators and balances from network)
                     // This uses the EXACT state from the genesis node, not hardcoded spec
+                    // Pass expected state root from genesis block header for verification
                     let validators = apply_received_genesis_state(
                         &mut state,
                         &genesis_info.validators,
                         &genesis_info.balances,
+                        genesis_info.block.header.state_root,
                     ).map_err(|e| NodeError::Storage(format!("Failed to apply genesis state: {}", e)))?;
 
                     info!("💾 Genesis stored locally");
@@ -581,14 +583,51 @@ impl KratOsNode {
             NetworkEvent::BlockReceived { block, from } => {
                 debug!("Received block #{} from {}", block.header.number, from);
 
-                // Validate and import block
-                if let Err(e) = self.import_block(block.clone()).await {
-                    warn!("Failed to import block: {:?}", e);
-                    // Record bad block from peer
+                let current_height = *self.chain_height.read().await;
+                let block_number = block.header.number;
+
+                // Check if block is already imported (duplicate)
+                if block_number <= current_height {
+                    debug!("Block #{} already imported, ignoring duplicate from {}", block_number, from);
+                    return;
+                }
+
+                // Check if block is too far ahead (out of order)
+                // Don't ban - this is normal during sync race conditions
+                if block_number > current_height + 1 {
+                    debug!("Block #{} is ahead of local height {}, buffering for later",
+                           block_number, current_height);
+                    // Add to sync manager's pending blocks for later import
                     let mut network = self.network.write().await;
-                    network.ban_peer(from, &format!("Invalid block: {:?}", e));
-                } else {
-                    debug!("Block #{} imported successfully", block.header.number);
+                    network.buffer_block(block);
+                    return;
+                }
+
+                // Validate and import block
+                match self.import_block(block.clone()).await {
+                    Ok(()) => {
+                        debug!("Block #{} imported successfully", block.header.number);
+                        // Try to import any buffered blocks that are now sequential
+                        self.try_import_buffered_blocks().await;
+                    }
+                    Err(e) => {
+                        // Only ban for serious validation errors, not sequencing issues
+                        let error_str = format!("{:?}", e);
+                        if error_str.contains("Block number mismatch") {
+                            // Race condition - block was already imported or another arrived first
+                            debug!("Block #{} sequencing issue, not banning peer: {}", block_number, e);
+                        } else if error_str.contains("Invalid signature")
+                            || error_str.contains("Invalid parent hash")
+                            || error_str.contains("Invalid transactions root") {
+                            // These are real validation failures - ban the peer
+                            warn!("Failed to import block from {}: {:?}", from, e);
+                            let mut network = self.network.write().await;
+                            network.ban_peer(from, &format!("Invalid block: {:?}", e));
+                        } else {
+                            // Other errors (state mismatch, etc) - log but don't ban
+                            warn!("Failed to import block #{}: {:?}", block_number, e);
+                        }
+                    }
                 }
             }
 
@@ -605,12 +644,50 @@ impl KratOsNode {
             NetworkEvent::SyncBlocksReceived { blocks, from, has_more } => {
                 info!("Received {} sync blocks from {} (has_more: {})", blocks.len(), from, has_more);
 
-                // Import blocks in order
+                let current_height = *self.chain_height.read().await;
+                let mut imported_count = 0;
+                let mut buffered_count = 0;
+
+                // Import blocks in order, buffer out-of-order ones
                 for block in blocks {
-                    if let Err(e) = self.import_block(block.clone()).await {
-                        warn!("Failed to import sync block #{}: {:?}", block.header.number, e);
-                        break;
+                    let block_number = block.header.number;
+
+                    // Skip already imported blocks (duplicates from multiple peers)
+                    if block_number <= current_height {
+                        debug!("Skipping already imported block #{}", block_number);
+                        continue;
                     }
+
+                    // Get current height (may have changed after imports)
+                    let current = *self.chain_height.read().await;
+
+                    if block_number == current + 1 {
+                        // This is the next sequential block - import it
+                        match self.import_block(block.clone()).await {
+                            Ok(()) => {
+                                imported_count += 1;
+                            }
+                            Err(e) => {
+                                // Log but don't break - try remaining blocks
+                                warn!("Failed to import sync block #{}: {:?}", block_number, e);
+                            }
+                        }
+                    } else {
+                        // Block is ahead - buffer it for later
+                        debug!("Buffering ahead block #{} (current: {})", block_number, current);
+                        let mut network = self.network.write().await;
+                        network.buffer_block(block);
+                        buffered_count += 1;
+                    }
+                }
+
+                if imported_count > 0 || buffered_count > 0 {
+                    info!("Sync: imported {} blocks, buffered {} blocks", imported_count, buffered_count);
+                }
+
+                // Try to import any buffered blocks that are now sequential
+                if imported_count > 0 {
+                    self.try_import_buffered_blocks().await;
                 }
 
                 // Continue sync if needed
@@ -686,6 +763,18 @@ impl KratOsNode {
                 current_height + 1,
                 block_number
             )));
+        }
+
+        // 1b. Idempotency check: if block already exists in storage with same hash, skip
+        // This prevents cumulative state corruption when import_block() is retried after failure
+        {
+            let storage = self.storage.read().await;
+            if let Ok(Some(existing)) = storage.get_block_by_number(block_number) {
+                if existing.hash() == block_hash {
+                    debug!("Block #{} already imported (idempotency check), skipping", block_number);
+                    return Ok(());
+                }
+            }
         }
 
         // 2. Get parent block and validate parent hash
@@ -773,6 +862,106 @@ impl KratOsNode {
                 total_fees = total_fees.saturating_add(result.fee_paid);
             }
 
+            // Process early validator voting transactions
+            // These are executed separately because they need access to ValidatorSet
+            for tx in block.body.transactions.iter() {
+                match &tx.transaction.call {
+                    TransactionCall::ProposeEarlyValidator { candidate } => {
+                        let mut validators = self.validators.write().await;
+                        match validators.propose_early_validator(*candidate, tx.transaction.sender, block_number) {
+                            Ok(()) => {
+                                info!(
+                                    "✅ Early validator proposed: {} by {} at block #{}",
+                                    candidate, tx.transaction.sender, block_number
+                                );
+                                // Check if quorum already reached (proposer counts as first vote)
+                                // With 1-2 validators, only 1 vote is needed, so proposal = approval
+                                if let Some(candidacy) = validators.get_candidate(candidate) {
+                                    if candidacy.has_quorum() {
+                                        match validators.approve_early_validator(*candidate, block_number) {
+                                            Ok(()) => {
+                                                info!(
+                                                    "🎉 Early validator {} auto-approved (quorum=1) at block #{}",
+                                                    candidate, block_number
+                                                );
+                                                // Initialize bootstrap VC so the new validator can be selected via VRF
+                                                // Bootstrap validators need BOOTSTRAP_MIN_VC_REQUIREMENT (100 VC)
+                                                // NOTE: We use the already-held `storage` lock from the outer scope
+                                                let current_epoch = block_number / 600; // EPOCH_DURATION_BLOCKS
+                                                if let Err(e) = storage.initialize_bootstrap_vc(*candidate, block_number, current_epoch) {
+                                                    warn!("Failed to initialize bootstrap VC for {}: {:?}", candidate, e);
+                                                } else {
+                                                    info!("🎯 Initialized 100 VC for new validator {}", candidate);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    "Failed to auto-approve early validator {}: {:?}",
+                                                    candidate, e
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                // Log but don't fail block import - transaction fee was already paid
+                                warn!(
+                                    "Early validator proposal failed: {} - {:?}",
+                                    candidate, e
+                                );
+                            }
+                        }
+                    }
+                    TransactionCall::VoteEarlyValidator { candidate } => {
+                        let mut validators = self.validators.write().await;
+                        match validators.vote_early_validator(*candidate, tx.transaction.sender, block_number) {
+                            Ok(has_quorum) => {
+                                if has_quorum {
+                                    // Quorum reached - approve and add to validator set
+                                    match validators.approve_early_validator(*candidate, block_number) {
+                                        Ok(()) => {
+                                            info!(
+                                                "🎉 Early validator {} APPROVED and added to validator set at block #{}",
+                                                candidate, block_number
+                                            );
+                                            // Initialize bootstrap VC so the new validator can be selected via VRF
+                                            // Bootstrap validators need BOOTSTRAP_MIN_VC_REQUIREMENT (100 VC)
+                                            // NOTE: We use the already-held `storage` lock from the outer scope
+                                            let current_epoch = block_number / 600; // EPOCH_DURATION_BLOCKS
+                                            if let Err(e) = storage.initialize_bootstrap_vc(*candidate, block_number, current_epoch) {
+                                                warn!("Failed to initialize bootstrap VC for {}: {:?}", candidate, e);
+                                            } else {
+                                                info!("🎯 Initialized 100 VC for new validator {}", candidate);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "Failed to approve early validator {}: {:?}",
+                                                candidate, e
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    info!(
+                                        "✅ Vote recorded for early validator {} by {} at block #{}",
+                                        candidate, tx.transaction.sender, block_number
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                // Log but don't fail block import - transaction fee was already paid
+                                warn!(
+                                    "Early validator vote failed: {} - {:?}",
+                                    candidate, e
+                                );
+                            }
+                        }
+                    }
+                    _ => {} // Other transaction types already executed
+                }
+            }
+
             // Apply block rewards (same as during production)
             // This credits the block author with block reward + fee share
             if let Err(e) = apply_block_rewards_for_import(
@@ -843,6 +1032,164 @@ impl KratOsNode {
         Ok(())
     }
 
+    /// Store a block that was just produced locally
+    ///
+    /// Unlike import_block, this method does NOT re-execute transactions or re-apply rewards
+    /// because the state was already modified during block production.
+    /// It only persists the block and updates chain state.
+    async fn store_produced_block(&self, block: Block) -> Result<(), NodeError> {
+        let block_number = block.header.number;
+        let block_hash = block.hash();
+
+        {
+            let storage = self.storage.write().await;
+
+            // Persist block to storage (state root already stored by produce_block)
+            storage.store_block(&block)
+                .map_err(|e| NodeError::Storage(format!("Failed to store block: {:?}", e)))?;
+
+            // Update best block in storage
+            storage.set_best_block(block_number)
+                .map_err(|e| NodeError::Storage(format!("Failed to set best block: {:?}", e)))?;
+        }
+
+        // Remove executed transactions from mempool
+        {
+            let mut mempool = self.mempool.write().await;
+            mempool.remove_included(&block.body.transactions);
+        }
+
+        // Process early validator voting transactions
+        // These are executed after block production because they need access to ValidatorSet
+        for tx in block.body.transactions.iter() {
+            match &tx.transaction.call {
+                TransactionCall::ProposeEarlyValidator { candidate } => {
+                    let mut validators = self.validators.write().await;
+                    match validators.propose_early_validator(*candidate, tx.transaction.sender, block_number) {
+                        Ok(()) => {
+                            info!(
+                                "✅ Early validator proposed: {} by {} at block #{}",
+                                candidate, tx.transaction.sender, block_number
+                            );
+                            // Check if quorum already reached (proposer counts as first vote)
+                            // With 1-2 validators, only 1 vote is needed, so proposal = approval
+                            if let Some(candidacy) = validators.get_candidate(candidate) {
+                                if candidacy.has_quorum() {
+                                    match validators.approve_early_validator(*candidate, block_number) {
+                                        Ok(()) => {
+                                            info!(
+                                                "🎉 Early validator {} auto-approved (quorum=1) at block #{}",
+                                                candidate, block_number
+                                            );
+                                            // Initialize bootstrap VC so the new validator can be selected via VRF
+                                            // Bootstrap validators need BOOTSTRAP_MIN_VC_REQUIREMENT (100 VC)
+                                            drop(validators); // Release validators lock before acquiring storage lock
+                                            let mut storage = self.storage.write().await;
+                                            let current_epoch = block_number / 600; // EPOCH_DURATION_BLOCKS
+                                            if let Err(e) = storage.initialize_bootstrap_vc(*candidate, block_number, current_epoch) {
+                                                warn!("Failed to initialize bootstrap VC for {}: {:?}", candidate, e);
+                                            } else {
+                                                info!("🎯 Initialized 100 VC for new validator {}", candidate);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "Failed to auto-approve early validator {}: {:?}",
+                                                candidate, e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Early validator proposal failed: {} - {:?}",
+                                candidate, e
+                            );
+                        }
+                    }
+                }
+                TransactionCall::VoteEarlyValidator { candidate } => {
+                    let mut validators = self.validators.write().await;
+                    match validators.vote_early_validator(*candidate, tx.transaction.sender, block_number) {
+                        Ok(has_quorum) => {
+                            if has_quorum {
+                                // Quorum reached - approve and add to validator set
+                                match validators.approve_early_validator(*candidate, block_number) {
+                                    Ok(()) => {
+                                        info!(
+                                            "🎉 Early validator {} APPROVED and added to validator set at block #{}",
+                                            candidate, block_number
+                                        );
+                                        // Initialize bootstrap VC so the new validator can be selected via VRF
+                                        // Bootstrap validators need BOOTSTRAP_MIN_VC_REQUIREMENT (100 VC)
+                                        drop(validators); // Release validators lock before acquiring storage lock
+                                        let mut storage = self.storage.write().await;
+                                        let current_epoch = block_number / 600; // EPOCH_DURATION_BLOCKS
+                                        if let Err(e) = storage.initialize_bootstrap_vc(*candidate, block_number, current_epoch) {
+                                            warn!("Failed to initialize bootstrap VC for {}: {:?}", candidate, e);
+                                        } else {
+                                            info!("🎯 Initialized 100 VC for new validator {}", candidate);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "Failed to approve early validator {}: {:?}",
+                                            candidate, e
+                                        );
+                                    }
+                                }
+                            } else {
+                                info!(
+                                    "✅ Vote recorded for early validator {} by {} at block #{}",
+                                    candidate, tx.transaction.sender, block_number
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Early validator vote failed: {} - {:?}",
+                                candidate, e
+                            );
+                        }
+                    }
+                }
+                _ => {} // Other transaction types already executed
+            }
+        }
+
+        // Update chain state
+        *self.current_block.write().await = Some(block.clone());
+        *self.chain_height.write().await = block_number;
+
+        // Update network with new state
+        {
+            let mut network = self.network.write().await;
+            network.update_local_state(block_number, block_hash);
+        }
+
+        // Broadcast block to peers
+        {
+            let mut network = self.network.write().await;
+            if let Err(e) = network.broadcast_block(block.clone()) {
+                warn!("Failed to broadcast produced block: {:?}", e);
+            }
+        }
+
+        let tx_count = block.body.transactions.len();
+        if tx_count > 0 {
+            info!(
+                "⛏️  Produced and stored block #{} ({}) with {} transactions",
+                block_number, block_hash, tx_count
+            );
+        } else {
+            info!("⛏️  Produced and stored block #{} ({})", block_number, block_hash);
+        }
+
+        Ok(())
+    }
+
     /// Perform periodic maintenance
     async fn perform_maintenance(&self) {
         // Clean up mempool
@@ -885,10 +1232,16 @@ impl KratOsNode {
     }
 
     /// Submit a transaction to the mempool
-    pub async fn submit_transaction(&self, tx: SignedTransaction) -> Result<Hash, NodeError> {
-        let hash = tx
-            .hash
-            .ok_or_else(|| NodeError::Transaction("Transaction missing hash".to_string()))?;
+    pub async fn submit_transaction(&self, mut tx: SignedTransaction) -> Result<Hash, NodeError> {
+        // Compute hash if not present (e.g., when deserialized from JSON RPC)
+        let hash = match tx.hash {
+            Some(h) => h,
+            None => {
+                let computed = tx.transaction.hash();
+                tx.hash = Some(computed);
+                computed
+            }
+        };
 
         // Add to mempool
         let mut mempool = self.mempool.write().await;
@@ -944,6 +1297,24 @@ impl KratOsNode {
         self.genesis_hash
     }
 
+    /// Get genesis timestamp from drift tracker
+    /// This is the canonical reference for slot/time calculations
+    pub async fn genesis_timestamp(&self) -> u64 {
+        let storage = self.storage.read().await;
+        storage.get_drift_tracker()
+            .ok()
+            .flatten()
+            .map(|t| t.genesis_timestamp)
+            .unwrap_or_else(|| {
+                // Fallback: try to get from genesis block
+                storage.get_block_by_number(0)
+                    .ok()
+                    .flatten()
+                    .map(|b| b.header.timestamp)
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp() as u64)
+            })
+    }
+
     /// Get sync gap (how far behind we are)
     pub async fn sync_gap(&self) -> u64 {
         self.network.read().await.sync_gap()
@@ -981,6 +1352,41 @@ impl KratOsNode {
     pub async fn start_sync(&self) {
         let mut network = self.network.write().await;
         network.maybe_start_sync();
+    }
+
+    /// Try to import any buffered blocks that are now sequential
+    /// Called after successfully importing a block to drain the buffer
+    async fn try_import_buffered_blocks(&self) {
+        loop {
+            let current_height = *self.chain_height.read().await;
+
+            // Try to get the next sequential block from the buffer
+            let next_block = {
+                let mut network = self.network.write().await;
+                network.update_sync_local_height(current_height);
+                network.next_buffered_block(current_height + 1)
+            };
+
+            match next_block {
+                Some(block) if block.header.number == current_height + 1 => {
+                    // Import the buffered block
+                    match self.import_block(block.clone()).await {
+                        Ok(()) => {
+                            debug!("Imported buffered block #{}", block.header.number);
+                            // Continue loop to try importing more buffered blocks
+                        }
+                        Err(e) => {
+                            warn!("Failed to import buffered block #{}: {:?}", block.header.number, e);
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    // No more sequential blocks in buffer
+                    break;
+                }
+            }
+        }
     }
 
     /// Get block by number from storage
@@ -1102,11 +1508,31 @@ impl KratOsNode {
             return Ok(None); // Already produced for this slot
         }
 
+        // Check if we are the slot leader via VRF selection
+        // This is CRITICAL for consensus - only the selected validator should produce
+        {
+            let producer = BlockProducer::new(None, self.producer_db.clone());
+            let validators = self.validators.read().await;
+            let storage = self.storage.read().await;
+            match producer.is_slot_leader(slot, epoch, &validators, &validator_id, &storage) {
+                Ok(true) => {
+                    // We are the slot leader, proceed with block production
+                    debug!("🎯 We are slot leader for epoch {}, slot {}", epoch, slot);
+                }
+                Ok(false) => {
+                    // Not our turn to produce
+                    return Ok(None);
+                }
+                Err(e) => {
+                    warn!("Failed to check slot leadership: {:?}", e);
+                    return Ok(None);
+                }
+            }
+        }
+
         // Use the persistent producer database for double-signing protection
         // This ensures signed slots are tracked across all block production attempts
         let mut producer = BlockProducer::new(Some(validator_key), self.producer_db.clone());
-
-        // Produce block
         match producer
             .produce_block(
                 &parent_block,
@@ -1119,8 +1545,9 @@ impl KratOsNode {
             .await
         {
             Ok(block) => {
-                // Import the block we just produced
-                self.import_block(block.clone()).await?;
+                // Store the block we just produced (without re-executing)
+                // State was already modified during production
+                self.store_produced_block(block.clone()).await?;
                 Ok(Some(block))
             }
             Err(crate::node::producer::ProductionError::AlreadySignedThisSlot) => {
@@ -1205,13 +1632,18 @@ fn apply_received_genesis_state(
     state: &mut StateBackend,
     validators: &[crate::network::request::GenesisValidatorInfo],
     balances: &[(AccountId, Balance)],
+    expected_state_root: Hash,
 ) -> Result<ValidatorSet, String> {
     use crate::consensus::validator::ValidatorInfo;
+
+    info!("🔍 Applying genesis state: {} balances, {} validators", balances.len(), validators.len());
+    info!("   Expected state root: {}", expected_state_root);
 
     // Initialize balances
     for (account, balance) in balances {
         let mut account_info = AccountInfo::new();
         account_info.free = *balance;
+        debug!("   Balance: {} = {} KRAT", account, *balance / crate::types::KRAT);
         state.set_account(*account, account_info)
             .map_err(|e| format!("Error setting account: {:?}", e))?;
     }
@@ -1220,6 +1652,8 @@ fn apply_received_genesis_state(
     let mut validator_set = ValidatorSet::new();
 
     for validator in validators {
+        debug!("   Validator: {} (bootstrap={}, stake={})",
+               validator.account, validator.is_bootstrap_validator, validator.stake);
         if validator.is_bootstrap_validator {
             // Bootstrap validator: create account with 0 balance if needed
             let account_info = state
@@ -1229,6 +1663,12 @@ fn apply_received_genesis_state(
 
             state.set_account(validator.account, account_info)
                 .map_err(|e| format!("Error setting account: {:?}", e))?;
+
+            // CRITICAL: Initialize bootstrap VC so the genesis validator can be selected via VRF
+            // Bootstrap validators (stake=0) need BOOTSTRAP_MIN_VC_REQUIREMENT (100 VC)
+            // This MUST match what the genesis node does in GenesisBuilder::build()
+            state.initialize_bootstrap_vc(validator.account, 0, 0)
+                .map_err(|e| format!("Error initialize_bootstrap_vc: {:?}", e))?;
 
             let validator_info = ValidatorInfo::new_bootstrap(validator.account, 0);
             validator_set.add_validator(validator_info)
@@ -1253,14 +1693,29 @@ fn apply_received_genesis_state(
         }
     }
 
-    // CRITICAL: Compute and store the state root for block 0
+    // CRITICAL: Compute and verify the state root for block 0
     // This MUST match what the genesis node computed
     let chain_id = crate::types::ChainId(0);
     let state_root = state.compute_state_root(0, chain_id);
+
+    // Verify computed state root matches the expected one from genesis block header
+    if state_root.root != expected_state_root {
+        error!(
+            "❌ Genesis state root mismatch! Expected: {}, Computed: {}",
+            expected_state_root, state_root.root
+        );
+        error!("   This indicates the genesis state initialization differs from the genesis node");
+        error!("   Check that all balances and validators are correctly transmitted and applied");
+        return Err(format!(
+            "Genesis state root mismatch: expected {}, computed {}",
+            expected_state_root, state_root.root
+        ));
+    }
+
     state.store_state_root(0, state_root)
         .map_err(|e| format!("Error storing state root: {:?}", e))?;
 
-    info!("📊 Genesis state root computed and stored: {}", state_root.root);
+    info!("📊 Genesis state root verified and stored: {}", state_root.root);
 
     Ok(validator_set)
 }

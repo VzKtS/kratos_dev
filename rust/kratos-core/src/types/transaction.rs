@@ -157,6 +157,25 @@ pub enum TransactionCall {
         /// Description
         description: String,
     },
+
+    // =========================================================================
+    // EARLY VALIDATOR VOTING (Bootstrap Era Only)
+    // Constitutional: Progressive decentralization through voting
+    // =========================================================================
+
+    /// Propose a new early validator candidate
+    /// Can only be submitted by existing validators during bootstrap era
+    ProposeEarlyValidator {
+        /// Candidate account to propose
+        candidate: AccountId,
+    },
+
+    /// Vote for an early validator candidate
+    /// Can only be submitted by existing validators during bootstrap era
+    VoteEarlyValidator {
+        /// Candidate to vote for
+        candidate: AccountId,
+    },
 }
 
 impl TransactionCall {
@@ -172,6 +191,10 @@ impl TransactionCall {
             TransactionCall::CreateSidechain { .. } => 1_000_000, // 0.001 KRAT
             TransactionCall::ExitSidechain { .. } => 500_000,
             TransactionCall::SignalFork { .. } => 10_000_000, // 0.01 KRAT (décourage spam)
+            // Early validator voting (bootstrap only)
+            // Low fees to encourage participation in decentralization
+            TransactionCall::ProposeEarlyValidator { .. } => 50_000, // 0.00005 KRAT
+            TransactionCall::VoteEarlyValidator { .. } => 10_000,    // 0.00001 KRAT
         }
     }
 }

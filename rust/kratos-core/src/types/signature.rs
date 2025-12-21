@@ -135,12 +135,62 @@ impl<'de> Deserialize<'de> for Signature64 {
     where
         D: Deserializer<'de>,
     {
-        let bytes = <Vec<u8>>::deserialize(deserializer)?;
-        if bytes.len() != 64 {
-            return Err(serde::de::Error::custom("Signature must be 64 bytes"));
+        use serde::de::Error;
+
+        // Try to deserialize as either a hex string or byte array
+        struct Signature64Visitor;
+
+        impl<'de> serde::de::Visitor<'de> for Signature64Visitor {
+            type Value = Signature64;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a hex string (0x...) or byte array of 64 bytes")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                let hex_str = value.strip_prefix("0x").unwrap_or(value);
+                let bytes = hex::decode(hex_str)
+                    .map_err(|e| E::custom(format!("Invalid hex: {}", e)))?;
+                if bytes.len() != 64 {
+                    return Err(E::custom(format!("Signature must be 64 bytes, got {}", bytes.len())));
+                }
+                let mut arr = [0u8; 64];
+                arr.copy_from_slice(&bytes);
+                Ok(Signature64(arr))
+            }
+
+            fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                if value.len() != 64 {
+                    return Err(E::custom(format!("Signature must be 64 bytes, got {}", value.len())));
+                }
+                let mut arr = [0u8; 64];
+                arr.copy_from_slice(value);
+                Ok(Signature64(arr))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut bytes = Vec::with_capacity(64);
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                if bytes.len() != 64 {
+                    return Err(A::Error::custom(format!("Signature must be 64 bytes, got {}", bytes.len())));
+                }
+                let mut arr = [0u8; 64];
+                arr.copy_from_slice(&bytes);
+                Ok(Signature64(arr))
+            }
         }
-        let mut arr = [0u8; 64];
-        arr.copy_from_slice(&bytes);
-        Ok(Signature64(arr))
+
+        deserializer.deserialize_bytes(Signature64Visitor)
     }
 }

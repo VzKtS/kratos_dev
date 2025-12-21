@@ -37,6 +37,13 @@ pub enum RpcCall {
     MempoolStatus(oneshot::Sender<MempoolStatus>),
     SubmitTransaction(SignedTransaction, oneshot::Sender<Result<Hash, String>>),
     GetVersion(oneshot::Sender<String>),
+    // State queries
+    StateGetNonce(AccountId, oneshot::Sender<Result<u64, String>>),
+    // Early Validator Voting methods (Bootstrap Era)
+    ValidatorGetEarlyVotingStatus(oneshot::Sender<Result<serde_json::Value, String>>),
+    ValidatorGetPendingCandidates(oneshot::Sender<Result<serde_json::Value, String>>),
+    ValidatorGetCandidateVotes(AccountId, oneshot::Sender<Result<serde_json::Value, String>>),
+    ValidatorCanVote(AccountId, oneshot::Sender<Result<serde_json::Value, String>>),
 }
 
 /// Channel sender for RPC calls
@@ -345,6 +352,7 @@ async fn route_request(request: JsonRpcRequest, state: &RpcState) -> JsonRpcResp
         // State methods
         "state_getAccount" => handle_state_get_account(request.id, request.params, state).await,
         "state_getBalance" => handle_state_get_balance(request.id, request.params, state).await,
+        "state_getNonce" => handle_state_get_nonce(request.id, request.params, state).await,
 
         // Author methods
         "author_submitTransaction" => handle_submit_transaction(request.id, request.params, state).await,
@@ -360,6 +368,12 @@ async fn route_request(request: JsonRpcRequest, state: &RpcState) -> JsonRpcResp
 
         // Mempool methods
         "mempool_status" => handle_mempool_status(request.id, state).await,
+
+        // Early Validator Voting methods (Bootstrap Era)
+        "validator_getEarlyVotingStatus" => handle_validator_get_early_voting_status(request.id, state).await,
+        "validator_getPendingCandidates" => handle_validator_get_pending_candidates(request.id, state).await,
+        "validator_getCandidateVotes" => handle_validator_get_candidate_votes(request.id, request.params, state).await,
+        "validator_canVote" => handle_validator_can_vote(request.id, request.params, state).await,
 
         // Unknown method
         _ => JsonRpcResponse::error(request.id, JsonRpcError::method_not_found(&request.method)),
@@ -470,6 +484,33 @@ async fn handle_state_get_balance(id: JsonRpcId, params: serde_json::Value, stat
     }
 }
 
+async fn handle_state_get_nonce(id: JsonRpcId, params: serde_json::Value, state: &RpcState) -> JsonRpcResponse {
+    let address_str: String = match params {
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            match arr[0].as_str() {
+                Some(s) => s.to_string(),
+                None => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected address string")),
+            }
+        }
+        _ => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected [address]")),
+    };
+
+    let account_id = match parse_account_id(&address_str) {
+        Ok(a) => a,
+        Err(e) => return JsonRpcResponse::error(id, JsonRpcError::invalid_params(&e)),
+    };
+
+    let (tx, rx) = oneshot::channel();
+    if state.tx.send(RpcCall::StateGetNonce(account_id, tx)).is_err() {
+        return JsonRpcResponse::error(id, JsonRpcError::internal_error("Node unavailable"));
+    }
+    match rx.await {
+        Ok(Ok(nonce)) => JsonRpcResponse::success(id, nonce),
+        Ok(Err(e)) => JsonRpcResponse::error(id, JsonRpcError::internal_error(&e)),
+        Err(_) => JsonRpcResponse::error(id, JsonRpcError::internal_error("Request timeout")),
+    }
+}
+
 async fn handle_submit_transaction(id: JsonRpcId, params: serde_json::Value, state: &RpcState) -> JsonRpcResponse {
     let tx_data: SignedTransaction = match params {
         serde_json::Value::Array(arr) if !arr.is_empty() => {
@@ -564,6 +605,88 @@ async fn handle_mempool_status(id: JsonRpcId, state: &RpcState) -> JsonRpcRespon
     }
     match rx.await {
         Ok(status) => JsonRpcResponse::success(id, status),
+        Err(_) => JsonRpcResponse::error(id, JsonRpcError::internal_error("Request timeout")),
+    }
+}
+
+// =============================================================================
+// EARLY VALIDATOR VOTING HANDLERS (Bootstrap Era)
+// =============================================================================
+
+async fn handle_validator_get_early_voting_status(id: JsonRpcId, state: &RpcState) -> JsonRpcResponse {
+    let (tx, rx) = oneshot::channel();
+    if state.tx.send(RpcCall::ValidatorGetEarlyVotingStatus(tx)).is_err() {
+        return JsonRpcResponse::error(id, JsonRpcError::internal_error("Node unavailable"));
+    }
+    match rx.await {
+        Ok(Ok(status)) => JsonRpcResponse::success(id, status),
+        Ok(Err(e)) => JsonRpcResponse::error(id, JsonRpcError::internal_error(&e)),
+        Err(_) => JsonRpcResponse::error(id, JsonRpcError::internal_error("Request timeout")),
+    }
+}
+
+async fn handle_validator_get_pending_candidates(id: JsonRpcId, state: &RpcState) -> JsonRpcResponse {
+    let (tx, rx) = oneshot::channel();
+    if state.tx.send(RpcCall::ValidatorGetPendingCandidates(tx)).is_err() {
+        return JsonRpcResponse::error(id, JsonRpcError::internal_error("Node unavailable"));
+    }
+    match rx.await {
+        Ok(Ok(candidates)) => JsonRpcResponse::success(id, candidates),
+        Ok(Err(e)) => JsonRpcResponse::error(id, JsonRpcError::internal_error(&e)),
+        Err(_) => JsonRpcResponse::error(id, JsonRpcError::internal_error("Request timeout")),
+    }
+}
+
+async fn handle_validator_get_candidate_votes(id: JsonRpcId, params: serde_json::Value, state: &RpcState) -> JsonRpcResponse {
+    let address_str: String = match params {
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            match arr[0].as_str() {
+                Some(s) => s.to_string(),
+                None => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected candidate address string")),
+            }
+        }
+        _ => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected [candidate_address]")),
+    };
+
+    let account_id = match parse_account_id(&address_str) {
+        Ok(a) => a,
+        Err(e) => return JsonRpcResponse::error(id, JsonRpcError::invalid_params(&e)),
+    };
+
+    let (tx, rx) = oneshot::channel();
+    if state.tx.send(RpcCall::ValidatorGetCandidateVotes(account_id, tx)).is_err() {
+        return JsonRpcResponse::error(id, JsonRpcError::internal_error("Node unavailable"));
+    }
+    match rx.await {
+        Ok(Ok(votes)) => JsonRpcResponse::success(id, votes),
+        Ok(Err(e)) => JsonRpcResponse::error(id, JsonRpcError::internal_error(&e)),
+        Err(_) => JsonRpcResponse::error(id, JsonRpcError::internal_error("Request timeout")),
+    }
+}
+
+async fn handle_validator_can_vote(id: JsonRpcId, params: serde_json::Value, state: &RpcState) -> JsonRpcResponse {
+    let address_str: String = match params {
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            match arr[0].as_str() {
+                Some(s) => s.to_string(),
+                None => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected account address string")),
+            }
+        }
+        _ => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected [account_address]")),
+    };
+
+    let account_id = match parse_account_id(&address_str) {
+        Ok(a) => a,
+        Err(e) => return JsonRpcResponse::error(id, JsonRpcError::invalid_params(&e)),
+    };
+
+    let (tx, rx) = oneshot::channel();
+    if state.tx.send(RpcCall::ValidatorCanVote(account_id, tx)).is_err() {
+        return JsonRpcResponse::error(id, JsonRpcError::internal_error("Node unavailable"));
+    }
+    match rx.await {
+        Ok(Ok(can_vote)) => JsonRpcResponse::success(id, can_vote),
+        Ok(Err(e)) => JsonRpcResponse::error(id, JsonRpcError::internal_error(&e)),
         Err(_) => JsonRpcResponse::error(id, JsonRpcError::internal_error("Request timeout")),
     }
 }

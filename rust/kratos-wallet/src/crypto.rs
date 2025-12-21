@@ -14,6 +14,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::SignedTransaction;
 
+/// Domain separator for transaction signatures (must match kratos-core)
+const DOMAIN_TRANSACTION: &[u8] = b"KRATOS_TRANSACTION_V1:";
+
+/// Create a domain-separated message for signing
+#[inline]
+fn domain_separate(domain: &[u8], message: &[u8]) -> Vec<u8> {
+    let mut separated = Vec::with_capacity(domain.len() + message.len());
+    separated.extend_from_slice(domain);
+    separated.extend_from_slice(message);
+    separated
+}
+
 /// Wallet keys (secret + public)
 pub struct WalletKeys {
     signing_key: SigningKey,
@@ -72,18 +84,65 @@ impl WalletKeys {
     /// Create and sign a transfer transaction
     pub fn create_transfer(&self, to: [u8; 32], amount: u128, nonce: u64) -> SignedTransaction {
         let transaction = crate::types::Transaction {
-            sender: self.account_id_bytes(),
+            sender: self.account_id_bytes().into(),
             nonce,
-            call: crate::types::TransactionCall::Transfer { to, amount },
+            call: crate::types::TransactionCall::Transfer { to: to.into(), amount },
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
         };
 
-        // Serialize for signing
+        // Serialize for signing with domain separation
         let tx_bytes = bincode::serialize(&transaction).unwrap();
-        let signature = self.sign(&tx_bytes);
+        let message = domain_separate(DOMAIN_TRANSACTION, &tx_bytes);
+        let signature = self.sign(&message);
+
+        SignedTransaction {
+            transaction,
+            signature,
+        }
+    }
+
+    /// Create and sign a propose early validator transaction
+    pub fn create_propose_early_validator(&self, candidate: [u8; 32], nonce: u64) -> SignedTransaction {
+        let transaction = crate::types::Transaction {
+            sender: self.account_id_bytes().into(),
+            nonce,
+            call: crate::types::TransactionCall::ProposeEarlyValidator { candidate: candidate.into() },
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+
+        // Serialize for signing with domain separation
+        let tx_bytes = bincode::serialize(&transaction).unwrap();
+        let message = domain_separate(DOMAIN_TRANSACTION, &tx_bytes);
+        let signature = self.sign(&message);
+
+        SignedTransaction {
+            transaction,
+            signature,
+        }
+    }
+
+    /// Create and sign a vote early validator transaction
+    pub fn create_vote_early_validator(&self, candidate: [u8; 32], nonce: u64) -> SignedTransaction {
+        let transaction = crate::types::Transaction {
+            sender: self.account_id_bytes().into(),
+            nonce,
+            call: crate::types::TransactionCall::VoteEarlyValidator { candidate: candidate.into() },
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
+
+        // Serialize for signing with domain separation
+        let tx_bytes = bincode::serialize(&transaction).unwrap();
+        let message = domain_separate(DOMAIN_TRANSACTION, &tx_bytes);
+        let signature = self.sign(&message);
 
         SignedTransaction {
             transaction,

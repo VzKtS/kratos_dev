@@ -1,13 +1,87 @@
 // Account - Système de comptes minimal
 use super::primitives::{Balance, Hash, Nonce};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 
 /// AccountId = clé publique Ed25519 (32 bytes)
 /// Principe: Pas d'identité, juste des clés
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AccountId([u8; 32]);
+
+// Custom serialization to support both hex strings and byte arrays
+impl Serialize for AccountId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for AccountId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        struct AccountIdVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for AccountIdVisitor {
+            type Value = AccountId;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a hex string (0x...) or byte array of 32 bytes")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                let hex_str = value.strip_prefix("0x").unwrap_or(value);
+                let bytes = hex::decode(hex_str)
+                    .map_err(|e| E::custom(format!("Invalid hex: {}", e)))?;
+                if bytes.len() != 32 {
+                    return Err(E::custom(format!("AccountId must be 32 bytes, got {}", bytes.len())));
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(AccountId(arr))
+            }
+
+            fn visit_bytes<E>(self, value: &[u8]) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                if value.len() != 32 {
+                    return Err(E::custom(format!("AccountId must be 32 bytes, got {}", value.len())));
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(value);
+                Ok(AccountId(arr))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut bytes = Vec::with_capacity(32);
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    bytes.push(byte);
+                }
+                if bytes.len() != 32 {
+                    return Err(A::Error::custom(format!("AccountId must be 32 bytes, got {}", bytes.len())));
+                }
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Ok(AccountId(arr))
+            }
+        }
+
+        deserializer.deserialize_bytes(AccountIdVisitor)
+    }
+}
 
 impl AccountId {
     pub fn from_public_key(key: &VerifyingKey) -> Self {

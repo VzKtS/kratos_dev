@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::types::{
-    AccountInfo, RpcTransactionRecord, SignedTransaction, TransactionDirection,
+    AccountInfo, CanVoteResponse, CandidateVotesResponse, EarlyVotingStatus,
+    PendingCandidatesResponse, RpcTransactionRecord, SignedTransaction, TransactionDirection,
     TransactionHistoryResponse, TransactionRecord, TransactionStatus, TransactionSubmitResult,
 };
 
@@ -121,17 +122,32 @@ impl RpcClient {
         // Convert to JSON format expected by RPC
         let tx_json = serde_json::json!({
             "transaction": {
-                "sender": format!("0x{}", hex::encode(tx.transaction.sender)),
+                "sender": format!("0x{}", hex::encode(tx.transaction.sender.0)),
                 "nonce": tx.transaction.nonce,
                 "call": match &tx.transaction.call {
                     crate::types::TransactionCall::Transfer { to, amount } => {
                         serde_json::json!({
                             "Transfer": {
-                                "to": format!("0x{}", hex::encode(to)),
+                                "to": format!("0x{}", hex::encode(to.0)),
                                 "amount": amount
                             }
                         })
                     }
+                    crate::types::TransactionCall::ProposeEarlyValidator { candidate } => {
+                        serde_json::json!({
+                            "ProposeEarlyValidator": {
+                                "candidate": format!("0x{}", hex::encode(candidate.0))
+                            }
+                        })
+                    }
+                    crate::types::TransactionCall::VoteEarlyValidator { candidate } => {
+                        serde_json::json!({
+                            "VoteEarlyValidator": {
+                                "candidate": format!("0x{}", hex::encode(candidate.0))
+                            }
+                        })
+                    }
+                    _ => return Err("Unsupported transaction type".to_string()),
                 },
                 "timestamp": tx.transaction.timestamp
             },
@@ -186,6 +202,110 @@ impl RpcClient {
     pub fn get_block_height(&self) -> Result<u64, String> {
         let info: ChainInfo = self.call("chain_getInfo", serde_json::Value::Null)?;
         Ok(info.height)
+    }
+
+    // =========================================================================
+    // EARLY VALIDATOR RPC METHODS
+    // =========================================================================
+
+    /// Get early validator voting status
+    ///
+    /// Returns information about the bootstrap era and voting requirements
+    pub fn get_early_voting_status(&self) -> Result<EarlyVotingStatus, String> {
+        self.call("validator_getEarlyVotingStatus", serde_json::Value::Null)
+    }
+
+    /// Get pending early validator candidates
+    ///
+    /// Returns list of all pending candidates with their vote counts
+    pub fn get_pending_candidates(&self) -> Result<PendingCandidatesResponse, String> {
+        self.call("validator_getPendingCandidates", serde_json::Value::Null)
+    }
+
+    /// Get votes for a specific candidate
+    ///
+    /// Returns detailed voting info for a candidate
+    pub fn get_candidate_votes(&self, candidate: &str) -> Result<CandidateVotesResponse, String> {
+        let candidate = if candidate.starts_with("0x") {
+            candidate.to_string()
+        } else {
+            format!("0x{}", candidate)
+        };
+
+        self.call("validator_getCandidateVotes", serde_json::json!([candidate]))
+    }
+
+    /// Check if account can vote for early validators
+    ///
+    /// Returns whether the account is an active validator who can vote
+    pub fn can_vote(&self, account: &str) -> Result<CanVoteResponse, String> {
+        let account = if account.starts_with("0x") {
+            account.to_string()
+        } else {
+            format!("0x{}", account)
+        };
+
+        self.call("validator_canVote", serde_json::json!([account]))
+    }
+
+    /// Submit a propose early validator transaction
+    pub fn submit_propose_early_validator(
+        &self,
+        tx: &SignedTransaction,
+    ) -> Result<TransactionSubmitResult, String> {
+        // Get the candidate from the transaction
+        let candidate_hex = match &tx.transaction.call {
+            crate::types::TransactionCall::ProposeEarlyValidator { candidate } => {
+                format!("0x{}", hex::encode(candidate.0))
+            }
+            _ => return Err("Expected ProposeEarlyValidator transaction".to_string()),
+        };
+
+        let tx_json = serde_json::json!({
+            "transaction": {
+                "sender": format!("0x{}", hex::encode(tx.transaction.sender.0)),
+                "nonce": tx.transaction.nonce,
+                "call": {
+                    "ProposeEarlyValidator": {
+                        "candidate": candidate_hex
+                    }
+                },
+                "timestamp": tx.transaction.timestamp
+            },
+            "signature": format!("0x{}", hex::encode(tx.signature))
+        });
+
+        self.call("author_submitTransaction", serde_json::json!([tx_json]))
+    }
+
+    /// Submit a vote early validator transaction
+    pub fn submit_vote_early_validator(
+        &self,
+        tx: &SignedTransaction,
+    ) -> Result<TransactionSubmitResult, String> {
+        // Get the candidate from the transaction
+        let candidate_hex = match &tx.transaction.call {
+            crate::types::TransactionCall::VoteEarlyValidator { candidate } => {
+                format!("0x{}", hex::encode(candidate.0))
+            }
+            _ => return Err("Expected VoteEarlyValidator transaction".to_string()),
+        };
+
+        let tx_json = serde_json::json!({
+            "transaction": {
+                "sender": format!("0x{}", hex::encode(tx.transaction.sender.0)),
+                "nonce": tx.transaction.nonce,
+                "call": {
+                    "VoteEarlyValidator": {
+                        "candidate": candidate_hex
+                    }
+                },
+                "timestamp": tx.transaction.timestamp
+            },
+            "signature": format!("0x{}", hex::encode(tx.signature))
+        });
+
+        self.call("author_submitTransaction", serde_json::json!([tx_json]))
     }
 
     /// Convert RPC transaction records to wallet transaction records

@@ -70,21 +70,20 @@ impl GenesisSpec {
         }
     }
 
-    /// Create genesis with a custom validator
-    /// SECURITY FIX: Updated default stake to meet MIN_VALIDATOR_STAKE (50,000 KRAT)
+    /// Create genesis with a custom validator (bootstrap style)
+    /// Bootstrap validators start with 0 stake and 0 balance, earning KRAT through block production
+    /// This follows the same model as early validators: 100 VC initialized, stake earned by validating
     pub fn with_validator(validator_account: AccountId) -> Self {
-        let mut balances = HashMap::new();
-
-        // Give funds to the custom validator
-        balances.insert(validator_account, 1_000_000 * KRAT);
+        // No initial balance - bootstrap validator earns KRAT through block production rewards
+        let balances = HashMap::new();
 
         Self {
             timestamp: GENESIS_TIMESTAMP,
             balances,
             validators: vec![GenesisValidator {
                 account: validator_account,
-                stake: 50_000 * KRAT,  // SECURITY FIX: Min 50k per SPEC 1 §8.1
-                is_bootstrap_validator: false,
+                stake: 0, // Bootstrap validator: 0 stake, earns through validation
+                is_bootstrap_validator: true, // Constitutional exception for block production
             }],
             tokenomics: TokenomicsState::genesis(),
         }
@@ -149,6 +148,11 @@ impl GenesisSpec {
 
                 state.set_account(validator.account, account_info)
                     .map_err(|e| format!("Error setting account: {:?}", e))?;
+
+                // Initialize bootstrap VC so the genesis validator can be selected via VRF
+                // CRITICAL: Bootstrap validators (stake=0) need BOOTSTRAP_MIN_VC_REQUIREMENT (100 VC)
+                state.initialize_bootstrap_vc(validator.account, 0, 0)
+                    .map_err(|e| format!("Error initialize_bootstrap_vc: {:?}", e))?;
 
                 let validator_info = ValidatorInfo::new_bootstrap(validator.account, 0);
                 validator_set.add_validator(validator_info)
@@ -218,6 +222,12 @@ impl GenesisBuilder {
 
                 state.set_account(validator.account, account_info)
                     .map_err(|e| format!("Erreur set_account: {:?}", e))?;
+
+                // Initialize bootstrap VC so the genesis validator can be selected via VRF
+                // CRITICAL: Bootstrap validators (stake=0) need BOOTSTRAP_MIN_VC_REQUIREMENT (100 VC)
+                // to have non-zero VRF weight. Without this, VRF weight = 0 and no blocks are produced.
+                state.initialize_bootstrap_vc(validator.account, 0, 0)
+                    .map_err(|e| format!("Erreur initialize_bootstrap_vc: {:?}", e))?;
 
                 // Add bootstrap validator to set
                 let validator_info = ValidatorInfo::new_bootstrap(validator.account, 0);
@@ -302,14 +312,14 @@ mod tests {
 
     #[test]
     fn test_with_validator_genesis() {
-        // Genesis with a custom validator
-        // SECURITY FIX: Updated to use new MIN_VALIDATOR_STAKE (50,000 KRAT)
+        // Genesis with a custom validator (bootstrap style)
+        // Bootstrap validators have 0 stake and 0 balance, earn KRAT through validation
         let validator = AccountId::from_bytes([1u8; 32]);
         let spec = GenesisSpec::with_validator(validator);
         assert_eq!(spec.validators.len(), 1);
-        assert_eq!(spec.balances.len(), 1);
-        assert_eq!(spec.validators[0].stake, 50_000 * KRAT);
-        assert!(!spec.validators[0].is_bootstrap_validator);
+        assert_eq!(spec.balances.len(), 0); // No initial balance for bootstrap validators
+        assert_eq!(spec.validators[0].stake, 0); // Bootstrap: 0 stake
+        assert!(spec.validators[0].is_bootstrap_validator);
     }
 
     #[test]
@@ -327,39 +337,41 @@ mod tests {
         assert_eq!(block.header.number, 0);
         assert_eq!(block.header.parent_hash, Hash::ZERO);
 
-        // Verify Alice account balance (1M - 50k staked)
-        // SECURITY FIX: Updated to use new MIN_VALIDATOR_STAKE (50,000 KRAT)
+        // Bootstrap validator: 0 balance, 0 stake (earns KRAT through validation)
         let account = state.get_account(&alice).unwrap().unwrap();
-        assert_eq!(account.free, 950_000 * KRAT);
+        assert_eq!(account.free, 0);
+        assert_eq!(account.reserved, 0);
 
         // Verify validator is in the set
         assert_eq!(validator_set.active_count(), 1);
         assert!(validator_set.is_active(&alice));
+
+        // Verify VC is initialized to 100 for VRF selection eligibility
+        let vc = state.get_total_vc(&alice).unwrap();
+        assert_eq!(vc, 100);
     }
 
     #[test]
-    fn test_genesis_validators_stake() {
+    fn test_genesis_validators_bootstrap() {
         let dir = tempdir().unwrap();
         let db = Database::open(dir.path().to_str().unwrap()).unwrap();
         let mut state = StateBackend::new(db);
 
         let alice = AccountId::from_bytes([1u8; 32]);
         let spec = GenesisSpec::with_validator(alice);
-        // SECURITY FIX: Updated to use new MIN_VALIDATOR_STAKE (50,000 KRAT)
-        let expected_stake = 50_000 * KRAT;
 
         let builder = GenesisBuilder::new(spec.clone());
         let (_, validator_set) = builder.build(&mut state).unwrap();
 
-        // Verify stake is reserved
+        // Bootstrap validator: 0 stake, 0 balance
         let account = state.get_account(&alice).unwrap().unwrap();
-        assert_eq!(account.reserved, expected_stake);
-        assert_eq!(account.free, 1_000_000 * KRAT - expected_stake);
+        assert_eq!(account.reserved, 0);
+        assert_eq!(account.free, 0);
 
-        // Verify validator is registered
+        // Verify validator is registered as bootstrap
         assert!(validator_set.is_active(&alice));
         let validator = validator_set.get_validator(&alice).unwrap();
-        assert_eq!(validator.stake, expected_stake);
+        assert_eq!(validator.stake, 0);
     }
 
     #[test]

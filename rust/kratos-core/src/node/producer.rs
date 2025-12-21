@@ -234,6 +234,18 @@ impl TransactionExecutor {
                 // Just deduct fee, signal is recorded elsewhere
                 Ok(())
             }
+            // Early validator voting - execution handled in node service
+            // where ValidatorSet is available. Here we just validate basic checks.
+            TransactionCall::ProposeEarlyValidator { .. } => {
+                // Actual validation done in node service with access to ValidatorSet
+                // Fee will be deducted if transaction succeeds
+                Ok(())
+            }
+            TransactionCall::VoteEarlyValidator { .. } => {
+                // Actual validation done in node service with access to ValidatorSet
+                // Fee will be deducted if transaction succeeds
+                Ok(())
+            }
         };
 
         match exec_result {
@@ -529,33 +541,30 @@ impl BlockValidator {
             });
         }
 
-        // 4. Timestamp should be consistent with the slot
-        // Each slot corresponds to a specific time window based on genesis
-        // The block timestamp should fall within or near the expected slot time
+        // 4. Timestamp-slot consistency using INCREMENTAL DRIFT model
         //
-        // Expected timestamp for slot S (relative to parent):
-        //   slot_diff = block.slot - parent.slot (accounting for epoch boundary)
-        //   expected_ts = parent_ts + (slot_diff * SLOT_DURATION_SECS)
+        // FIX: Use interval-based validation aligned with DriftTracker.
+        // The slot field contains ABSOLUTE slots since genesis, not relative to epoch.
+        // We validate that the time INTERVAL matches the slot INTERVAL.
         //
-        // We allow some tolerance (±SLOT_DURATION_SECS) for clock skew
-        let slot_diff = if block.header.epoch > parent.header.epoch {
-            // Crossed epoch boundary: calculate total slots
-            let slots_remaining_in_parent_epoch =
-                crate::consensus::epoch::EPOCH_DURATION_BLOCKS.saturating_sub(parent.header.slot);
-            slots_remaining_in_parent_epoch + block.header.slot
-        } else {
-            block.header.slot.saturating_sub(parent.header.slot)
-        };
+        // INCREMENTAL MODEL:
+        //   slots_elapsed = block.slot - parent.slot (absolute slots)
+        //   expected_interval = slots_elapsed × SLOT_DURATION_SECS
+        //   actual_interval = block_ts - parent_ts
+        //   drift = actual_interval - expected_interval
+        //
+        // We allow drift within ±SLOT_DURATION_SECS for clock skew.
+        let slots_elapsed = block.header.slot.saturating_sub(parent.header.slot);
+        let expected_interval = slots_elapsed.saturating_mul(SLOT_DURATION_SECS);
+        let actual_interval = block_ts.saturating_sub(parent_ts);
 
-        let expected_ts = parent_ts.saturating_add(slot_diff * SLOT_DURATION_SECS);
+        // Calculate drift (signed)
+        let drift = (actual_interval as i64).saturating_sub(expected_interval as i64);
 
-        // Allow timestamp to be within [expected - SLOT_DURATION, expected + SLOT_DURATION]
-        let min_expected = expected_ts.saturating_sub(SLOT_DURATION_SECS);
-        let max_expected = expected_ts.saturating_add(SLOT_DURATION_SECS);
-
-        if block_ts < min_expected || block_ts > max_expected {
+        // Allow drift within ±SLOT_DURATION_SECS
+        if drift.abs() > SLOT_DURATION_SECS as i64 {
             return Err(ValidationError::TimestampSlotMismatch {
-                expected_ts,
+                expected_ts: parent_ts.saturating_add(expected_interval),
                 actual_ts: block_ts,
                 slot: block.header.slot,
             });

@@ -122,9 +122,9 @@ async fn run_event_loop(
     let mut network_poll_interval = tokio::time::interval(std::time::Duration::from_millis(100));
 
     // Get genesis timestamp for slot calculation
-    let genesis_timestamp = node.current_block().await
-        .map(|b| b.header.timestamp)
-        .unwrap_or_else(|| chrono::Utc::now().timestamp() as u64);
+    // CRITICAL: Must use the canonical genesis timestamp, not the current block timestamp
+    // The genesis timestamp is the reference point for all slot calculations
+    let genesis_timestamp = node.genesis_timestamp().await;
 
     if config.validator && validator_key.is_some() {
         info!("⏱️  Block production: every {}s", SLOT_DURATION_SECS);
@@ -359,6 +359,129 @@ async fn handle_rpc_call(node: &Arc<KratOsNode>, call: RpcCall, config: &NodeCon
 
         RpcCall::GetVersion(resp) => {
             let _ = resp.send(env!("CARGO_PKG_VERSION").to_string());
+        }
+
+        RpcCall::StateGetNonce(account_id, resp) => {
+            match node.get_nonce(&account_id).await {
+                Ok(nonce) => {
+                    let _ = resp.send(Ok(nonce));
+                }
+                Err(e) => {
+                    let _ = resp.send(Err(format!("Failed to get nonce: {:?}", e)));
+                }
+            }
+        }
+
+        // Early Validator Voting methods (Bootstrap Era)
+        RpcCall::ValidatorGetEarlyVotingStatus(resp) => {
+            use crate::consensus::validator::{BOOTSTRAP_ERA_BLOCKS, MAX_EARLY_VALIDATORS, ValidatorSet};
+
+            let height = node.chain_height().await;
+            let is_bootstrap = ValidatorSet::is_bootstrap_era(height);
+            let validators_arc = node.validators();
+            let validators = validators_arc.read().await;
+            let active_count = validators.active_count();
+            let votes_required = validators.votes_required_for_new_validator();
+            let pending_count = validators.pending_candidates().len();
+
+            let result = serde_json::json!({
+                "is_bootstrap_era": is_bootstrap,
+                "current_block": height,
+                "bootstrap_end_block": BOOTSTRAP_ERA_BLOCKS,
+                "blocks_until_end": if is_bootstrap { BOOTSTRAP_ERA_BLOCKS.saturating_sub(height) } else { 0 },
+                "votes_required": votes_required,
+                "validator_count": active_count,
+                "max_validators": MAX_EARLY_VALIDATORS,
+                "pending_candidates": pending_count,
+                "can_add_validators": is_bootstrap && active_count < MAX_EARLY_VALIDATORS
+            });
+            let _ = resp.send(Ok(result));
+        }
+
+        RpcCall::ValidatorGetPendingCandidates(resp) => {
+            let validators_arc = node.validators();
+            let validators = validators_arc.read().await;
+            let candidates: Vec<_> = validators.pending_candidates()
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "candidate": format!("0x{}", hex::encode(c.candidate.as_bytes())),
+                        "proposer": format!("0x{}", hex::encode(c.proposer.as_bytes())),
+                        "vote_count": c.vote_count(),
+                        "votes_required": c.votes_required,
+                        "has_quorum": c.has_quorum(),
+                        "created_at": c.created_at,
+                        "voters": c.voters.iter()
+                            .map(|v| format!("0x{}", hex::encode(v.as_bytes())))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+
+            let result = serde_json::json!({
+                "candidates": candidates,
+                "count": candidates.len()
+            });
+            let _ = resp.send(Ok(result));
+        }
+
+        RpcCall::ValidatorGetCandidateVotes(candidate_id, resp) => {
+            let validators_arc = node.validators();
+            let validators = validators_arc.read().await;
+
+            let result = match validators.get_candidate(&candidate_id) {
+                Some(candidacy) => {
+                    serde_json::json!({
+                        "candidate": format!("0x{}", hex::encode(candidate_id.as_bytes())),
+                        "proposer": format!("0x{}", hex::encode(candidacy.proposer.as_bytes())),
+                        "status": format!("{:?}", candidacy.status),
+                        "vote_count": candidacy.vote_count(),
+                        "votes_required": candidacy.votes_required,
+                        "has_quorum": candidacy.has_quorum(),
+                        "created_at": candidacy.created_at,
+                        "approved_at": candidacy.approved_at,
+                        "voters": candidacy.voters.iter()
+                            .map(|v| format!("0x{}", hex::encode(v.as_bytes())))
+                            .collect::<Vec<_>>()
+                    })
+                }
+                None => {
+                    serde_json::json!({
+                        "candidate": format!("0x{}", hex::encode(candidate_id.as_bytes())),
+                        "status": "not_found",
+                        "error": "No candidacy found for this account"
+                    })
+                }
+            };
+            let _ = resp.send(Ok(result));
+        }
+
+        RpcCall::ValidatorCanVote(account_id, resp) => {
+            use crate::consensus::validator::ValidatorSet;
+
+            let height = node.chain_height().await;
+            let validators_arc = node.validators();
+            let validators = validators_arc.read().await;
+            let can_vote = validators.can_vote_early_validator(&account_id, height);
+            let is_validator = validators.is_active(&account_id);
+            let is_bootstrap = ValidatorSet::is_bootstrap_era(height);
+
+            let result = serde_json::json!({
+                "account": format!("0x{}", hex::encode(account_id.as_bytes())),
+                "can_vote": can_vote,
+                "is_validator": is_validator,
+                "is_bootstrap_era": is_bootstrap,
+                "reason": if can_vote {
+                    "Account is an active validator during bootstrap era"
+                } else if !is_validator {
+                    "Account is not an active validator"
+                } else if !is_bootstrap {
+                    "Bootstrap era has ended"
+                } else {
+                    "Unknown reason"
+                }
+            });
+            let _ = resp.send(Ok(result));
         }
     }
 }

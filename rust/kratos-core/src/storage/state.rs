@@ -743,6 +743,23 @@ impl StateBackend {
         }
     }
 
+    /// Initialize VC for a bootstrap validator with minimum required VC
+    /// Bootstrap validators need BOOTSTRAP_MIN_VC_REQUIREMENT (100) to be eligible for VRF selection
+    /// This is called when an early validator is approved during bootstrap era
+    pub fn initialize_bootstrap_vc(
+        &mut self,
+        validator_id: AccountId,
+        block_number: BlockNumber,
+        current_epoch: EpochNumber,
+    ) -> Result<(), StateError> {
+        // Create a new VC record with bootstrap credits
+        let mut record = ValidatorCreditsRecord::new(block_number, current_epoch);
+        // Grant bootstrap VC (100) as uptime credits so they can be selected via VRF
+        // This matches BOOTSTRAP_MIN_VC_REQUIREMENT in vrf_selection.rs
+        record.uptime_credits = 100;
+        self.set_vc_record(validator_id, record)
+    }
+
     // ===== Unbonding Storage =====
 
     /// Get unbonding info for an account

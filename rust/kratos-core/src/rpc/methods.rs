@@ -66,6 +66,12 @@ impl RpcMethods {
             "clock_getHealth" => self.clock_get_health(request.id).await,
             "clock_getValidatorRecord" => self.clock_get_validator_record(request.id, request.params).await,
 
+            // Early Validator Voting methods (Bootstrap Era)
+            "validator_getEarlyVotingStatus" => self.validator_get_early_voting_status(request.id).await,
+            "validator_getPendingCandidates" => self.validator_get_pending_candidates(request.id).await,
+            "validator_getCandidateVotes" => self.validator_get_candidate_votes(request.id, request.params).await,
+            "validator_canVote" => self.validator_can_vote(request.id, request.params).await,
+
             // Unknown method
             _ => JsonRpcResponse::error(request.id, JsonRpcError::method_not_found(&request.method)),
         }
@@ -579,6 +585,168 @@ impl RpcMethods {
                 JsonRpcResponse::error(id, JsonRpcError::internal_error(&format!("Storage error: {:?}", e)))
             }
         }
+    }
+
+    // =========================================================================
+    // EARLY VALIDATOR VOTING METHODS (Bootstrap Era)
+    // Constitutional: Progressive decentralization through voting
+    // =========================================================================
+
+    /// Get early voting status
+    ///
+    /// Returns the current status of the early validator voting system:
+    /// - is_bootstrap_era: Whether voting is currently allowed
+    /// - current_block: Current block height
+    /// - bootstrap_end_block: When bootstrap era ends
+    /// - votes_required: Current threshold for new validators
+    /// - validator_count: Active validator count
+    /// - max_validators: Maximum early validators allowed
+    async fn validator_get_early_voting_status(&self, id: JsonRpcId) -> JsonRpcResponse {
+        use crate::consensus::validator::{BOOTSTRAP_ERA_BLOCKS, MAX_EARLY_VALIDATORS, ValidatorSet};
+
+        let height = self.node.chain_height().await;
+        let is_bootstrap = ValidatorSet::is_bootstrap_era(height);
+        let validators_arc = self.node.validators();
+        let validators = validators_arc.read().await;
+        let active_count = validators.active_count();
+        let votes_required = validators.votes_required_for_new_validator();
+        let pending_count = validators.pending_candidates().len();
+
+        JsonRpcResponse::success(id, serde_json::json!({
+            "is_bootstrap_era": is_bootstrap,
+            "current_block": height,
+            "bootstrap_end_block": BOOTSTRAP_ERA_BLOCKS,
+            "blocks_until_end": if is_bootstrap { BOOTSTRAP_ERA_BLOCKS.saturating_sub(height) } else { 0 },
+            "votes_required": votes_required,
+            "validator_count": active_count,
+            "max_validators": MAX_EARLY_VALIDATORS,
+            "pending_candidates": pending_count,
+            "can_add_validators": is_bootstrap && active_count < MAX_EARLY_VALIDATORS
+        }))
+    }
+
+    /// Get pending early validator candidates
+    ///
+    /// Returns list of all pending candidates with their vote counts
+    async fn validator_get_pending_candidates(&self, id: JsonRpcId) -> JsonRpcResponse {
+        let validators_arc = self.node.validators();
+        let validators = validators_arc.read().await;
+        let candidates: Vec<_> = validators.pending_candidates()
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "candidate": format!("0x{}", hex::encode(c.candidate.as_bytes())),
+                    "proposer": format!("0x{}", hex::encode(c.proposer.as_bytes())),
+                    "vote_count": c.vote_count(),
+                    "votes_required": c.votes_required,
+                    "has_quorum": c.has_quorum(),
+                    "created_at": c.created_at,
+                    "voters": c.voters.iter()
+                        .map(|v| format!("0x{}", hex::encode(v.as_bytes())))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        JsonRpcResponse::success(id, serde_json::json!({
+            "candidates": candidates,
+            "count": candidates.len()
+        }))
+    }
+
+    /// Get votes for a specific candidate
+    ///
+    /// Returns detailed voting info for a candidate
+    async fn validator_get_candidate_votes(&self, id: JsonRpcId, params: serde_json::Value) -> JsonRpcResponse {
+        // Parse candidate address from params
+        let candidate_str: String = match params {
+            serde_json::Value::Array(arr) if !arr.is_empty() => {
+                match arr[0].as_str() {
+                    Some(s) => s.to_string(),
+                    None => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected candidate address string")),
+                }
+            }
+            _ => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected [candidate_address]")),
+        };
+
+        // Parse account ID
+        let candidate_id = match parse_account_id(&candidate_str) {
+            Ok(acc) => acc,
+            Err(e) => return JsonRpcResponse::error(id, JsonRpcError::invalid_params(&e)),
+        };
+
+        let validators_arc = self.node.validators();
+        let validators = validators_arc.read().await;
+
+        match validators.get_candidate(&candidate_id) {
+            Some(candidacy) => {
+                JsonRpcResponse::success(id, serde_json::json!({
+                    "candidate": candidate_str,
+                    "proposer": format!("0x{}", hex::encode(candidacy.proposer.as_bytes())),
+                    "status": format!("{:?}", candidacy.status),
+                    "vote_count": candidacy.vote_count(),
+                    "votes_required": candidacy.votes_required,
+                    "has_quorum": candidacy.has_quorum(),
+                    "created_at": candidacy.created_at,
+                    "approved_at": candidacy.approved_at,
+                    "voters": candidacy.voters.iter()
+                        .map(|v| format!("0x{}", hex::encode(v.as_bytes())))
+                        .collect::<Vec<_>>()
+                }))
+            }
+            None => {
+                JsonRpcResponse::success(id, serde_json::json!({
+                    "candidate": candidate_str,
+                    "status": "not_found",
+                    "error": "No candidacy found for this account"
+                }))
+            }
+        }
+    }
+
+    /// Check if an account can vote for early validators
+    ///
+    /// Returns whether the account is an active validator who can vote
+    async fn validator_can_vote(&self, id: JsonRpcId, params: serde_json::Value) -> JsonRpcResponse {
+        // Parse account address from params
+        let account_str: String = match params {
+            serde_json::Value::Array(arr) if !arr.is_empty() => {
+                match arr[0].as_str() {
+                    Some(s) => s.to_string(),
+                    None => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected account address string")),
+                }
+            }
+            _ => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected [account_address]")),
+        };
+
+        // Parse account ID
+        let account_id = match parse_account_id(&account_str) {
+            Ok(acc) => acc,
+            Err(e) => return JsonRpcResponse::error(id, JsonRpcError::invalid_params(&e)),
+        };
+
+        let height = self.node.chain_height().await;
+        let validators_arc = self.node.validators();
+        let validators = validators_arc.read().await;
+        let can_vote = validators.can_vote_early_validator(&account_id, height);
+        let is_validator = validators.is_active(&account_id);
+        let is_bootstrap = crate::consensus::validator::ValidatorSet::is_bootstrap_era(height);
+
+        JsonRpcResponse::success(id, serde_json::json!({
+            "account": account_str,
+            "can_vote": can_vote,
+            "is_validator": is_validator,
+            "is_bootstrap_era": is_bootstrap,
+            "reason": if can_vote {
+                "Account is an active validator during bootstrap era"
+            } else if !is_validator {
+                "Account is not an active validator"
+            } else if !is_bootstrap {
+                "Bootstrap era has ended"
+            } else {
+                "Unknown reason"
+            }
+        }))
     }
 
     // =========================================================================

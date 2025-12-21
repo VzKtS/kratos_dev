@@ -978,4 +978,22 @@ impl NetworkService {
     pub fn get_banned_peers(&self) -> Vec<PeerId> {
         self.rate_limiter.banned_peers()
     }
+
+    /// Buffer a block that arrived out of order
+    /// The sync manager will hold it until it can be imported sequentially
+    pub fn buffer_block(&mut self, block: Block) {
+        debug!("Buffering out-of-order block #{}", block.header.number);
+        self.sync_manager.add_downloaded_block(block);
+    }
+
+    /// Get the next buffered block to import (if any is sequential)
+    pub fn next_buffered_block(&mut self, expected_height: BlockNumber) -> Option<Block> {
+        // Check if we have the next sequential block
+        self.sync_manager.next_block_to_import()
+    }
+
+    /// Update local height in sync manager
+    pub fn update_sync_local_height(&mut self, height: BlockNumber) {
+        self.sync_manager.update_local_height(height);
+    }
 }

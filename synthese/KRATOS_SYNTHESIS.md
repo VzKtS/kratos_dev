@@ -1,6 +1,6 @@
 # KratOs Protocol Synthesis
 
-**Version:** 1.11
+**Version:** 1.20
 **Status:** Normative
 **Last Updated:** 2025-12-21
 
@@ -17,7 +17,7 @@ KratOs is a minimal, auditable, and durable blockchain protocol designed for coe
 | **Power is slow** | Governance changes require time; no instant protocol changes |
 | **Failures are local** | One chain's failure doesn't affect others |
 | **Exit is always possible** | Capital is never permanently frozen |
-| **Merit over wealth** | Validator Credits balance stake-based power |
+| **Merit over wealth** | Validator Credits balance stake-based power | not just krat stake
 
 ### Unified Architecture
 
@@ -60,7 +60,7 @@ The unified architecture is maintained through a **dual-repository model**:
 │                                                              │
 │  ┌──────────────┐     ┌──────────────┐                      │
 │  │   testnet    │ ──► │   mainnet    │                      │
-│  │  (staging)   │     │    (live)    │                      │
+│ (staging/auditable)   │     │ (live)    │                       │
 │  └──────────────┘     └──────────────┘                      │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -509,6 +509,21 @@ When a node restarts after being offline:
 3. Drift tracking resumes with next consecutive block
 
 **INVARIANT:** A validator with clock issues can still participate once their clock synchronizes.
+
+### Unified Timestamp Validation
+
+Both `BlockValidator` (producer.rs) and `DriftTracker` (state.rs) use the **same incremental model**:
+
+```
+slots_elapsed = block.slot - parent.slot
+expected_interval = slots_elapsed × slot_duration
+actual_interval = block_ts - parent_ts
+drift = actual_interval - expected_interval
+```
+
+**Key insight:** The slot field contains **absolute slots** since genesis (not relative to epoch). Using interval-based validation ensures correct behavior during synchronization of historical chains.
+
+**Source:** SPEC_3 §15, producer.rs:544-571
 
 ---
 
@@ -1128,10 +1143,688 @@ Full audit report: [SECURITY_AUDIT_REPORT.md](../SECURITY_AUDIT_REPORT.md)
 
 ---
 
-## 20. Document History
+## 20. Early Validator Voting System
+
+### Overview
+
+During the bootstrap era, new validators can be onboarded through a decentralized voting mechanism. Active validators can propose and vote for candidates to join the validator set.
+
+### Voting Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Votes required | 3 (from active validators) |
+| Bootstrap only | Yes (disabled post-bootstrap) |
+| Proposer | Must be active validator |
+| Voter | Must be active validator |
+| Duplicate vote | Rejected |
+
+### Transaction Types
+
+| Transaction | Description |
+|-------------|-------------|
+| `ProposeEarlyValidator` | Propose a new candidate |
+| `VoteEarlyValidator` | Vote for a pending candidate |
+
+### Candidate Lifecycle
+
+```
+Proposed → Pending (collecting votes) → Approved (3 votes) → Active Validator
+                     ↓
+               Rejected (bootstrap ends)
+```
+
+### Voting Rules
+
+1. Only active validators can propose candidates
+2. Only active validators can vote
+3. A validator can only vote once per candidate
+4. Proposer's vote counts as first vote
+5. Candidate becomes validator when reaching 3 votes
+6. All pending candidates rejected when bootstrap ends
+
+### RPC Methods
+
+| Method | Description |
+|--------|-------------|
+| `validator_getEarlyVotingStatus` | Get bootstrap era status |
+| `validator_getPendingCandidates` | List all pending candidates |
+| `validator_getCandidateVotes` | Get votes for a candidate |
+| `validator_canVote` | Check if account can vote |
+
+### Implementation Files
+
+| File | Contents |
+|------|----------|
+| `consensus/validator.rs` | Early voting logic |
+| `node/service.rs` | Transaction handling |
+| `rpc/methods.rs` | RPC endpoints |
+
+**Source:** `consensus/validator.rs:156-270`, `rpc/methods.rs:280-400`
+
+### Transaction Execution Architecture
+
+Early validator transactions use a **two-phase execution model** because `ValidatorSet` is a separate in-memory structure from `StateBackend`:
+
+```
+Transaction Flow:
+┌──────────────────────────────────────────────────────────────────────┐
+│                        Block Production/Import                        │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                       │
+│   Phase 1: producer.rs (TransactionExecutor)                         │
+│   ─────────────────────────────────────────                          │
+│   • Validate sender exists                                            │
+│   • Check balance for fees                                            │
+│   • ProposeEarlyValidator → Ok() (defer execution)                   │
+│   • VoteEarlyValidator → Ok() (defer execution)                      │
+│   • Deduct fees, increment nonce                                      │
+│                                                                       │
+│   Phase 2: service.rs (import_block / store_produced_block)          │
+│   ─────────────────────────────────────────────────────────          │
+│   • After all transactions executed                                   │
+│   • Loop through block transactions                                   │
+│   • Match ProposeEarlyValidator → validators.propose_early_validator()│
+│   • Match VoteEarlyValidator → validators.vote_early_validator()      │
+│   • Log results (success/failure)                                     │
+│                                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**Key Implementation Details:**
+
+| Component | File | Lines | Responsibility |
+|-----------|------|-------|----------------|
+| Fee validation | `producer.rs` | 239-248 | Accept tx, defer execution |
+| Block import execution | `service.rs` | 851-900 | Execute on ValidatorSet |
+| Block production execution | `service.rs` | 999-1046 | Execute on ValidatorSet |
+
+**Why Two Phases?**
+
+1. `TransactionExecutor` only has access to `StateBackend` (persistent storage)
+2. `ValidatorSet` is an in-memory structure in `NodeService`
+3. Early validator voting modifies `ValidatorSet.pending_candidates`
+4. The execution must happen where `ValidatorSet` is accessible
+
+**Source:** `node/producer.rs:239-248`, `node/service.rs:851-900`, `node/service.rs:999-1046`
+
+---
+
+## 21. Sync Race Condition Handling
+
+### Problem
+
+During initial synchronization, blocks can arrive:
+- **Out of order:** Block #5 arrives before block #4
+- **Duplicated:** Same block arrives from multiple peers
+- **Ahead of local height:** Block #10 arrives when local is at #3
+
+Naive handling caused premature peer banning with "Block number mismatch" errors.
+
+### Solution: Block Buffering
+
+Instead of rejecting out-of-order blocks, they are buffered for later import:
+
+```
+Block Received (from peer)
+    │
+    ▼
+┌───────────────────┐
+│ Already imported? │──► Yes ──► Ignore (duplicate)
+└─────────┬─────────┘
+          │ No
+          ▼
+┌───────────────────┐
+│ Next sequential?  │──► Yes ──► Import immediately
+│ (height + 1)      │           Then try buffered blocks
+└─────────┬─────────┘
+          │ No (ahead)
+          ▼
+┌───────────────────┐
+│ Buffer for later  │
+│ (SyncManager)     │
+└───────────────────┘
+```
+
+### Selective Peer Banning
+
+Only ban peers for **real validation failures**:
+
+| Condition | Action |
+|-----------|--------|
+| Duplicate block | Ignore silently |
+| Out-of-order block | Buffer for later |
+| Block number mismatch | Log, don't ban |
+| **Invalid signature** | **Ban peer** |
+| **Invalid parent hash** | **Ban peer** |
+| **Invalid transactions root** | **Ban peer** |
+
+### Implementation
+
+```rust
+// In node/service.rs - BlockReceived handler
+if block_number <= current_height {
+    // Duplicate - ignore
+    return;
+}
+
+if block_number > current_height + 1 {
+    // Out of order - buffer
+    network.buffer_block(block);
+    return;
+}
+
+// Sequential - import and try buffered
+match import_block(block).await {
+    Ok(()) => {
+        try_import_buffered_blocks().await;
+    }
+    Err(e) if is_validation_error(&e) => {
+        network.ban_peer(from, &format!("Invalid block: {:?}", e));
+    }
+    Err(e) => {
+        // Sequencing issue - don't ban
+        warn!("Block import failed: {:?}", e);
+    }
+}
+```
+
+### Buffer Drain Loop
+
+After each successful import, buffered blocks are checked:
+
+```rust
+async fn try_import_buffered_blocks(&self) {
+    loop {
+        let current = chain_height.read().await;
+        let next = network.next_buffered_block(current + 1);
+
+        match next {
+            Some(block) if block.number == current + 1 => {
+                import_block(block).await?;
+            }
+            _ => break,
+        }
+    }
+}
+```
+
+### Key Files
+
+| File | Contents |
+|------|----------|
+| `node/service.rs` | BlockReceived handler, buffer drain |
+| `network/service.rs` | buffer_block(), next_buffered_block() |
+| `network/sync.rs` | SyncManager block storage |
+
+**Source:** `node/service.rs:581-630`, `network/service.rs:982-998`
+
+---
+
+## 22. Genesis Timestamp Fix
+
+### Problem
+
+During initial sync, nodes were receiving "TimestampSlotMismatch" errors because slot calculations used wall-clock time instead of genesis timestamp.
+
+### Root Cause
+
+```rust
+// WRONG: Used current time
+let expected_slot = (current_time - genesis_time) / SLOT_DURATION;
+
+// But genesis_time wasn't being read from genesis block
+```
+
+### Solution
+
+Genesis timestamp is now properly propagated and used as the canonical time reference:
+
+```rust
+// In GenesisConfig
+pub genesis_timestamp: u64,  // Set from genesis block
+
+// In slot calculation
+let slots_since_genesis = (block_timestamp - genesis_timestamp) / SLOT_DURATION;
+let expected_slot = slots_since_genesis % SLOTS_PER_EPOCH;
+```
+
+### Genesis Block Time Flow
+
+```
+Genesis Block Created
+    │
+    ├── timestamp = block creation time
+    │
+    ▼
+Genesis Block Shared (via GenesisResponse)
+    │
+    ├── Joining node receives genesis
+    │
+    ▼
+GenesisConfig.genesis_timestamp = genesis.header.timestamp
+    │
+    ├── All slot calculations use this reference
+    │
+    ▼
+Slots validated against genesis time (not wall clock)
+```
+
+### Key Invariant
+
+**All nodes on the network use the same genesis timestamp for slot calculations.**
+
+**Source:** `genesis/config.rs`, `node/service.rs`
+
+---
+
+## 23. Block Production vs Import
+
+### Problem
+
+When a validator produces a block, the state is modified during production (transaction execution, reward distribution). If the same `import_block()` function is used to store the produced block, it re-executes transactions and re-applies rewards, causing a **State root mismatch**.
+
+### Root Cause
+
+```rust
+// In try_produce_block():
+let block = producer.produce_block(...).await?;  // Modifies state, computes state_root
+self.import_block(block).await?;  // RE-modifies state → different state_root!
+```
+
+The `import_block()` function is designed for blocks received from peers - it must validate them by re-executing. But for locally produced blocks, the state was already modified.
+
+### Solution
+
+Separate paths for produced vs received blocks:
+
+| Block Source | Function | State Modification |
+|--------------|----------|-------------------|
+| Produced locally | `store_produced_block()` | None (already done) |
+| Received from peer | `import_block()` | Full re-execution |
+
+### store_produced_block()
+
+This function stores a locally produced block without re-executing:
+
+```rust
+async fn store_produced_block(&self, block: Block) -> Result<(), NodeError> {
+    // 1. Store block to database (state_root already stored by produce_block)
+    storage.store_block(&block)?;
+    storage.set_best_block(block_number)?;
+
+    // 2. Remove transactions from mempool
+    mempool.remove_included(&block.body.transactions);
+
+    // 3. Update chain state
+    *current_block = Some(block.clone());
+    *chain_height = block_number;
+
+    // 4. Broadcast to peers
+    network.broadcast_block(block)?;
+}
+```
+
+### Key Invariant
+
+**State modifications happen exactly once per block:**
+- For produced blocks: during `produce_block()`
+- For imported blocks: during `import_block()`
+
+**Source:** `node/service.rs:921-977`, `node/service.rs:1307-1311`
+
+---
+
+## 24. RPC Channel Architecture
+
+### Overview
+
+The RPC server uses a **channel-based architecture** because libp2p's `Swarm` is not `Sync`. HTTP handlers cannot directly access the node - they send requests through channels to the node's async context.
+
+### Architecture Flow
+
+```
+HTTP Request (warp)
+    │
+    ▼
+route_request() ─────► Creates RpcCall enum variant
+    │                   with oneshot::Sender
+    ▼
+state.tx.send(RpcCall::...) ─────► mpsc channel
+    │
+    ▼
+handle_rpc_call() (runner.rs) ─────► Processes in node context
+    │
+    ▼
+oneshot response ─────► Back to HTTP handler
+    │
+    ▼
+JsonRpcResponse
+```
+
+### RpcCall Enum
+
+Each RPC method has a corresponding variant in `RpcCall`:
+
+```rust
+pub enum RpcCall {
+    // Chain methods
+    ChainGetInfo(oneshot::Sender<Result<ChainInfo, String>>),
+    ChainGetBlock(BlockNumber, oneshot::Sender<Result<BlockWithTransactions, String>>),
+
+    // State methods
+    StateGetBalance(AccountId, oneshot::Sender<Result<Balance, String>>),
+    StateGetAccount(AccountId, oneshot::Sender<Result<AccountInfoRpc, String>>),
+    StateGetNonce(AccountId, oneshot::Sender<Result<u64, String>>),
+
+    // Transaction submission
+    SubmitTransaction(SignedTransaction, oneshot::Sender<Result<Hash, String>>),
+
+    // Early Validator Voting (Bootstrap Era)
+    ValidatorGetEarlyVotingStatus(oneshot::Sender<Result<serde_json::Value, String>>),
+    ValidatorGetPendingCandidates(oneshot::Sender<Result<serde_json::Value, String>>),
+    ValidatorGetCandidateVotes(AccountId, oneshot::Sender<...>),
+    ValidatorCanVote(AccountId, oneshot::Sender<...>),
+    // ... other variants
+}
+```
+
+### Adding New RPC Methods
+
+To add a new RPC method, modify **three files**:
+
+| File | Change |
+|------|--------|
+| `rpc/server.rs` | Add `RpcCall` variant |
+| `rpc/server.rs` | Add route in `route_request()` |
+| `rpc/server.rs` | Add handler function |
+| `cli/runner.rs` | Add match arm in `handle_rpc_call()` |
+
+### Implementation Files
+
+| File | Contents |
+|------|----------|
+| `rpc/server.rs` | RpcCall enum, route_request(), handlers |
+| `cli/runner.rs` | handle_rpc_call() processing |
+| `rpc/types.rs` | RPC request/response types |
+
+**Source:** `rpc/server.rs:27-47`, `cli/runner.rs:260-486`
+
+---
+
+## 25. Hex String Deserialization
+
+### Problem
+
+External clients (wallet, web) send data as hex strings (`"0x..."`), but Rust types expect byte arrays.
+
+### Solution
+
+Custom `Deserialize` implementations that accept both formats:
+
+```rust
+impl<'de> Deserialize<'de> for AccountId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error> {
+        // Accepts:
+        // - Hex string: "0x1234..." or "1234..."
+        // - Byte array: [0x12, 0x34, ...]
+        // - Sequence: [18, 52, ...]
+    }
+}
+```
+
+### Affected Types
+
+| Type | Size | File |
+|------|------|------|
+| `AccountId` | 32 bytes | `types/account.rs` |
+| `Signature64` | 64 bytes | `types/signature.rs` |
+
+### Visitor Pattern
+
+Each type uses a custom `Visitor` with three methods:
+
+```rust
+fn visit_str()   // For hex strings "0x..."
+fn visit_bytes() // For binary data
+fn visit_seq()   // For JSON arrays [1, 2, 3, ...]
+```
+
+**Source:** `types/account.rs:22-84`, `types/signature.rs:133-196`
+
+---
+
+## 26. Transaction Hash Auto-Computation
+
+### Problem
+
+Transactions submitted via RPC have `hash: None` (field is `#[serde(skip)]`), causing "Transaction missing hash" errors.
+
+### Solution
+
+`submit_transaction()` computes the hash if not present:
+
+```rust
+pub async fn submit_transaction(&self, mut tx: SignedTransaction) -> Result<Hash, NodeError> {
+    let hash = match tx.hash {
+        Some(h) => h,
+        None => {
+            let computed = tx.transaction.hash();
+            tx.hash = Some(computed);
+            computed
+        }
+    };
+    // ... continue with mempool insertion
+}
+```
+
+### Transaction Hash Calculation
+
+```rust
+impl Transaction {
+    pub fn hash(&self) -> Hash {
+        let bytes = bincode::serialize(self)?;
+        Hash::hash(&bytes)
+    }
+}
+```
+
+**Source:** `node/service.rs:1021-1030`
+
+---
+
+## 27. Wallet-Node RPC Integration
+
+### Wallet RPC Client
+
+The wallet uses a blocking HTTP client to communicate with the node:
+
+```rust
+pub struct RpcClient {
+    url: String,
+    client: reqwest::blocking::Client,
+    request_id: AtomicU64,
+}
+```
+
+### Available RPC Methods (Wallet)
+
+| Method | Description |
+|--------|-------------|
+| `state_getAccount` | Get account info |
+| `state_getNonce` | Get account nonce |
+| `state_getBalance` | Get account balance |
+| `author_submitTransaction` | Submit signed transaction |
+| `validator_getEarlyVotingStatus` | Bootstrap era status |
+| `validator_getPendingCandidates` | List pending candidates |
+| `validator_getCandidateVotes` | Votes for a candidate |
+| `validator_canVote` | Check if account can vote |
+
+### Transaction Serialization
+
+Wallet serializes transactions as JSON with hex strings:
+
+```json
+{
+  "transaction": {
+    "sender": "0x...",
+    "nonce": 0,
+    "call": { "ProposeEarlyValidator": { "candidate": "0x..." } },
+    "timestamp": 1703170800
+  },
+  "signature": "0x..."
+}
+```
+
+Node deserializes hex strings via custom `Deserialize` implementations.
+
+**Source:** `kratos-wallet/src/rpc.rs`, `kratos-wallet/src/crypto.rs`
+
+---
+
+## 28. VRF Slot Selection
+
+### Problem
+
+Previously, all active validators attempted to produce blocks for every slot, causing conflicts and competing blocks.
+
+### Solution: is_slot_leader() Check
+
+Before producing a block, validators check if they are the VRF-selected slot leader:
+
+```rust
+// In try_produce_block() - service.rs:1459-1500
+{
+    let producer = BlockProducer::new(None, self.producer_db.clone());
+    let validators = self.validators.read().await;
+    let storage = self.storage.read().await;
+    match producer.is_slot_leader(slot, epoch, &validators, &validator_id, &storage) {
+        Ok(true) => {
+            // We are the slot leader, proceed
+        }
+        Ok(false) => {
+            return Ok(None); // Not our turn
+        }
+        Err(e) => {
+            return Ok(None); // VRF check failed
+        }
+    }
+}
+```
+
+### Slot Leader Selection Algorithm
+
+1. Build candidate list from active validators with stake and VC
+2. Compute VRF weight: `min(sqrt(stake), sqrt(STAKE_CAP)) × ln(1 + VC)`
+3. Use deterministic VRF selection based on slot + epoch
+4. Compare selected validator with local validator ID
+
+**Key Invariant:** Exactly one validator produces per slot, ensuring no competing blocks.
+
+**Source:** `node/service.rs:1459-1500`, `node/producer.rs:1013-1050`, SPEC_3 §16
+
+---
+
+## 29. Bootstrap VC Initialization
+
+### Problem
+
+Bootstrap validators (stake=0) need minimum 100 VC to participate in VRF selection:
+
+```rust
+// In vrf_selection.rs
+const BOOTSTRAP_MIN_VC_REQUIREMENT: u64 = 100;
+
+if stake == 0 && validator_credits < BOOTSTRAP_MIN_VC_REQUIREMENT {
+    return 0.0; // Zero VRF weight - cannot be selected
+}
+```
+
+New early validators started with 0 VC, so they had zero VRF weight and were never selected as slot leaders.
+
+### Solution
+
+When a bootstrap validator is created or approved, initialize their VC with 100 uptime credits:
+
+```rust
+// In storage/state.rs:746-761
+pub fn initialize_bootstrap_vc(&mut self, validator_id: AccountId, ...) -> Result<(), StateError> {
+    let mut record = ValidatorCreditsRecord::new(block_number, current_epoch);
+    record.uptime_credits = 100; // BOOTSTRAP_MIN_VC_REQUIREMENT
+    self.set_vc_record(validator_id, record)
+}
+```
+
+### When VC is Initialized
+
+VC initialization happens in multiple code paths:
+
+| Location | Code Path |
+|----------|-----------|
+| `genesis/spec.rs::build()` | Genesis node: validator creation |
+| `genesis/spec.rs::apply_to_state()` | Joining node: genesis spec initialization |
+| `service.rs::apply_received_genesis_state()` | Joining node: network genesis initialization |
+| `import_block()` | When quorum reached for ProposeEarlyValidator or VoteEarlyValidator |
+| `store_produced_block()` | Same, for locally produced blocks |
+
+**CRITICAL:** All code paths that initialize bootstrap validators MUST call `initialize_bootstrap_vc()`. Missing this causes state root mismatch during block sync because the VC bonus affects block rewards calculation.
+
+### Result
+
+With 100 VC initialized:
+- Bootstrap validator has non-zero VRF weight
+- Can be selected as slot leader
+- Participates fairly in block production rotation with other validators
+
+**Source:** `storage/state.rs:746-761`, `node/service.rs:873-882`, SPEC_3 §17
+
+---
+
+## 30. Deadlock Prevention in import_block()
+
+### Problem
+
+When an early validator was approved via `ProposeEarlyValidator` or `VoteEarlyValidator`, the code attempted to initialize their 100 VC by acquiring a new storage write lock. However, `import_block()` already held a storage write lock from line 845, causing a **deadlock** (tokio's RwLock is not reentrant).
+
+### Symptoms
+
+- Early validator approved message appeared in logs
+- "Initialized 100 VC" message never appeared
+- New validator never produced blocks (0 VRF weight)
+- Node appeared stuck during block import
+
+### Solution
+
+Reuse the existing `storage` variable from the outer scope instead of acquiring a new lock:
+
+```rust
+// Before (DEADLOCK):
+drop(validators);
+let mut storage = self.storage.write().await;  // Tries to acquire lock we already hold!
+storage.initialize_bootstrap_vc(...);
+
+// After (CORRECT):
+// `storage` from outer scope is already available
+storage.initialize_bootstrap_vc(...);  // Reuse existing lock
+```
+
+**Source:** `node/service.rs:889-895` (ProposeEarlyValidator), `node/service.rs:930-936` (VoteEarlyValidator)
+
+---
+
+## 31. Document History
 
 | Date | Version | Change |
 |------|---------|--------|
+| 2025-12-21 | 1.20 | **Deadlock Fix**: Fixed tokio RwLock deadlock in import_block() - VC initialization for early validators now reuses outer storage lock |
+| 2025-12-21 | 1.19 | **Joining Node VC Fix**: Added VC initialization in `apply_received_genesis_state()` - fixes state root mismatch on block #1 import |
+| 2025-12-21 | 1.18 | **Genesis Validator VC Fix**: Genesis validators now get 100 VC at creation for VRF eligibility. All validators (genesis + early) now use bootstrap model (0 stake, 0 balance, earn through validation) |
+| 2025-12-21 | 1.17 | **VRF Slot Selection & Bootstrap VC**: Added §28 VRF slot leader check before block production, §29 Bootstrap VC initialization for new early validators |
+| 2025-12-21 | 1.16 | Added domain separation for transaction signing (KRATOS_TRANSACTION_V1 prefix) |
+| 2025-12-21 | 1.15 | **Early Validator Execution Fix**: Added two-phase transaction execution architecture in §20 - ProposeEarlyValidator and VoteEarlyValidator now properly execute on ValidatorSet |
+| 2025-12-21 | 1.14 | Added §24-27: RPC Channel Architecture, Hex Deserialization, Transaction Hash Auto-Computation, Wallet-Node Integration |
+| 2025-12-21 | 1.13 | Added §23 Block Production vs Import - fix for State root mismatch bug |
+| 2025-12-21 | 1.12 | Added §20 Early Validator Voting, §21 Sync Race Condition Handling, §22 Genesis Timestamp Fix |
 | 2025-12-19 | 1.11 | **Network Event Loop Fix**: Main event loop (`run_event_loop`) now polls network every 100ms - fixes genesis node not responding to mDNS/genesis requests |
 | 2025-12-19 | 1.10 | **mDNS-Only Discovery**: Allow joining networks via mDNS alone without requiring bootnodes - removed early return that blocked mDNS discovery |
 | 2025-12-19 | 1.9 | **mDNS Fix**: Auto-dial discovered peers, swarm polling during genesis exchange, added `poll_once()` for non-blocking network processing |

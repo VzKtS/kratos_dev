@@ -2,7 +2,7 @@
 use crate::types::{AccountId, Balance, BlockNumber};
 use crate::types::contributor::{NetworkRoleRegistry, RoleRegistryError};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Montant minimum pour devenir validateur
 /// SECURITY FIX #40: Aligned with SPEC 1 §8.1 Stake Floor
@@ -24,6 +24,109 @@ pub const BOOTSTRAP_ERA_BLOCKS: BlockNumber = 864_000;
 /// Grace period for bootstrap validators to stake after bootstrap era ends (in blocks)
 /// Ex: 7 days = 7 * 24 * 3600 / 6 = 100,800 blocks
 pub const BOOTSTRAP_GRACE_PERIOD: BlockNumber = 100_800;
+
+/// Maximum number of early validators that can be added during bootstrap era
+/// Constitutional limit to ensure controlled decentralization
+pub const MAX_EARLY_VALIDATORS: usize = 21;
+
+/// Expiration time for early validator candidacy (in blocks)
+/// 7 days = 7 * 24 * 3600 / 6 = 100,800 blocks
+pub const CANDIDACY_EXPIRATION: BlockNumber = 100_800;
+
+// =============================================================================
+// EARLY VALIDATOR VOTING SYSTEM
+// Constitutional Principle: Progressive decentralization with vote-based inclusion
+// During bootstrap, validators are added through voting with progressive thresholds
+// =============================================================================
+
+/// Candidacy status for early validator voting
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CandidacyStatus {
+    /// Pending votes
+    Pending,
+    /// Approved and added to validator set
+    Approved,
+    /// Rejected (expired or insufficient votes)
+    Rejected,
+    /// Expired (candidacy timeout)
+    Expired,
+}
+
+/// Early validator candidate awaiting votes
+/// Constitutional: Candidates must be voted in by existing validators
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EarlyValidatorCandidate {
+    /// Candidate account
+    pub candidate: AccountId,
+
+    /// Who proposed the candidate (must be existing validator)
+    pub proposer: AccountId,
+
+    /// Set of validators who voted for this candidate
+    pub voters: BTreeSet<AccountId>,
+
+    /// Number of votes required for approval
+    /// Dynamically calculated based on current validator count
+    pub votes_required: usize,
+
+    /// Block number when candidacy was created
+    pub created_at: BlockNumber,
+
+    /// Current status
+    pub status: CandidacyStatus,
+
+    /// Block number when approved (if approved)
+    pub approved_at: Option<BlockNumber>,
+}
+
+impl EarlyValidatorCandidate {
+    /// Create a new candidate
+    pub fn new(
+        candidate: AccountId,
+        proposer: AccountId,
+        votes_required: usize,
+        created_at: BlockNumber,
+    ) -> Self {
+        let mut voters = BTreeSet::new();
+        // Proposer automatically votes for the candidate
+        voters.insert(proposer);
+
+        Self {
+            candidate,
+            proposer,
+            voters,
+            votes_required,
+            created_at,
+            status: CandidacyStatus::Pending,
+            approved_at: None,
+        }
+    }
+
+    /// Add a vote from a validator
+    pub fn add_vote(&mut self, voter: AccountId) -> bool {
+        self.voters.insert(voter)
+    }
+
+    /// Check if candidate has enough votes
+    pub fn has_quorum(&self) -> bool {
+        self.voters.len() >= self.votes_required
+    }
+
+    /// Current vote count
+    pub fn vote_count(&self) -> usize {
+        self.voters.len()
+    }
+
+    /// Check if candidacy has expired
+    pub fn is_expired(&self, current_block: BlockNumber) -> bool {
+        current_block > self.created_at + CANDIDACY_EXPIRATION
+    }
+
+    /// Check if a specific validator has voted
+    pub fn has_voted(&self, voter: &AccountId) -> bool {
+        self.voters.contains(voter)
+    }
+}
 
 /// Statut d'un validateur
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,6 +350,11 @@ pub struct ValidatorSet {
     /// Unified network role registry (tracks all roles: Validator, Juror, Contributor)
     #[serde(default)]
     pub role_registry: NetworkRoleRegistry,
+
+    /// Early validator candidates (bootstrap era only)
+    /// Constitutional: Progressive voting for decentralization
+    #[serde(default)]
+    pub early_candidates: BTreeMap<AccountId, EarlyValidatorCandidate>,
 }
 
 impl ValidatorSet {
@@ -255,6 +363,7 @@ impl ValidatorSet {
             validators: BTreeMap::new(),
             total_stake: 0,
             role_registry: NetworkRoleRegistry::new(),
+            early_candidates: BTreeMap::new(),
         }
     }
 
@@ -486,6 +595,222 @@ impl ValidatorSet {
     pub fn role_registry_validator_count(&self) -> usize {
         self.role_registry.validator_count()
     }
+
+    // =========================================================================
+    // EARLY VALIDATOR VOTING SYSTEM
+    // Constitutional: Progressive decentralization through voting
+    // =========================================================================
+
+    /// Calculate votes required based on current validator count
+    /// Constitutional principle: Progressive thresholds for security
+    ///
+    /// - Validators 1-2: Bootstrap validator votes alone (1 vote)
+    /// - Validators 3-5: Require 3 votes (majority of small set)
+    /// - Validators 6-10: Require 4 votes
+    /// - Validators 11+: Require 5 votes (sovereign threshold)
+    pub fn votes_required_for_new_validator(&self) -> usize {
+        let current_count = self.active_count();
+        match current_count {
+            0..=2 => 1,   // Bootstrap phase: bootstrap validator decides
+            3..=5 => 3,   // Small set: 3 votes (60-100%)
+            6..=10 => 4,  // Medium set: 4 votes (40-67%)
+            _ => 5,       // Large set: 5 votes (sovereign minimum)
+        }
+    }
+
+    /// Propose a new early validator candidate
+    /// Only during bootstrap era, only by active validators
+    pub fn propose_early_validator(
+        &mut self,
+        candidate: AccountId,
+        proposer: AccountId,
+        current_block: BlockNumber,
+    ) -> Result<(), ValidatorError> {
+        // Security: Only during bootstrap era
+        if !Self::is_bootstrap_era(current_block) {
+            return Err(ValidatorError::BootstrapEnded);
+        }
+
+        // Security: Check maximum validator limit
+        if self.active_count() >= MAX_EARLY_VALIDATORS {
+            return Err(ValidatorError::MaxValidatorsReached);
+        }
+
+        // Security: Proposer must be active validator
+        if !self.is_active(&proposer) {
+            return Err(ValidatorError::NotValidator);
+        }
+
+        // Security: Candidate must not already be a validator
+        if self.validators.contains_key(&candidate) {
+            return Err(ValidatorError::AlreadyRegistered);
+        }
+
+        // Security: Candidate must not already be pending
+        if self.early_candidates.contains_key(&candidate) {
+            return Err(ValidatorError::CandidacyExists);
+        }
+
+        // Create candidacy with calculated vote threshold
+        let votes_required = self.votes_required_for_new_validator();
+        let candidacy = EarlyValidatorCandidate::new(
+            candidate,
+            proposer,
+            votes_required,
+            current_block,
+        );
+
+        self.early_candidates.insert(candidate, candidacy);
+
+        tracing::info!(
+            "Early validator candidacy proposed: {} by {} (votes needed: {})",
+            candidate, proposer, votes_required
+        );
+
+        Ok(())
+    }
+
+    /// Vote for an early validator candidate
+    /// Only active validators can vote, each validator votes once
+    pub fn vote_early_validator(
+        &mut self,
+        candidate: AccountId,
+        voter: AccountId,
+        current_block: BlockNumber,
+    ) -> Result<bool, ValidatorError> {
+        // Security: Only during bootstrap era
+        if !Self::is_bootstrap_era(current_block) {
+            return Err(ValidatorError::BootstrapEnded);
+        }
+
+        // Security: Voter must be active validator
+        if !self.is_active(&voter) {
+            return Err(ValidatorError::NotValidator);
+        }
+
+        // Get candidacy
+        let candidacy = self.early_candidates
+            .get_mut(&candidate)
+            .ok_or(ValidatorError::CandidacyNotFound)?;
+
+        // Security: Check expiration
+        if candidacy.is_expired(current_block) {
+            candidacy.status = CandidacyStatus::Expired;
+            return Err(ValidatorError::CandidacyExpired);
+        }
+
+        // Security: Candidacy must still be pending
+        if candidacy.status != CandidacyStatus::Pending {
+            return Err(ValidatorError::CandidacyNotPending);
+        }
+
+        // Security: Voter must not have already voted
+        if candidacy.has_voted(&voter) {
+            return Err(ValidatorError::AlreadyVoted);
+        }
+
+        // Add vote
+        candidacy.add_vote(voter);
+
+        tracing::info!(
+            "Vote added for early validator {}: {}/{} votes",
+            candidate, candidacy.vote_count(), candidacy.votes_required
+        );
+
+        // Check if quorum reached
+        Ok(candidacy.has_quorum())
+    }
+
+    /// Approve an early validator candidate and add to validator set
+    /// Called when quorum is reached
+    pub fn approve_early_validator(
+        &mut self,
+        candidate: AccountId,
+        current_block: BlockNumber,
+    ) -> Result<(), ValidatorError> {
+        // First, validate candidacy without keeping borrow
+        let vote_count = {
+            let candidacy = self.early_candidates
+                .get(&candidate)
+                .ok_or(ValidatorError::CandidacyNotFound)?;
+
+            if !candidacy.has_quorum() {
+                return Err(ValidatorError::InsufficientVotes);
+            }
+
+            if candidacy.status != CandidacyStatus::Pending {
+                return Err(ValidatorError::CandidacyNotPending);
+            }
+
+            candidacy.vote_count()
+        };
+
+        // Create bootstrap validator (0 stake during bootstrap)
+        let validator = ValidatorInfo::new_bootstrap(candidate, current_block);
+
+        // Add to validator set (with is_bootstrap_validator = true)
+        self.add_validator(validator)?;
+
+        // Now update candidacy status
+        if let Some(candidacy) = self.early_candidates.get_mut(&candidate) {
+            candidacy.status = CandidacyStatus::Approved;
+            candidacy.approved_at = Some(current_block);
+        }
+
+        tracing::info!(
+            "Early validator approved and added: {} (votes: {})",
+            candidate, vote_count
+        );
+
+        Ok(())
+    }
+
+    /// Get pending early validator candidates
+    pub fn pending_candidates(&self) -> Vec<&EarlyValidatorCandidate> {
+        self.early_candidates
+            .values()
+            .filter(|c| c.status == CandidacyStatus::Pending)
+            .collect()
+    }
+
+    /// Get candidate by account
+    pub fn get_candidate(&self, candidate: &AccountId) -> Option<&EarlyValidatorCandidate> {
+        self.early_candidates.get(candidate)
+    }
+
+    /// Clean up expired candidacies
+    pub fn cleanup_expired_candidacies(&mut self, current_block: BlockNumber) -> Vec<AccountId> {
+        let expired: Vec<AccountId> = self.early_candidates
+            .iter()
+            .filter(|(_, c)| c.is_expired(current_block) && c.status == CandidacyStatus::Pending)
+            .map(|(id, _)| *id)
+            .collect();
+
+        for id in &expired {
+            if let Some(c) = self.early_candidates.get_mut(id) {
+                c.status = CandidacyStatus::Expired;
+            }
+        }
+
+        expired
+    }
+
+    /// Check if account is an early validator (bootstrap validator added via voting)
+    pub fn is_early_validator(&self, account: &AccountId) -> bool {
+        // Check if they're a validator AND their candidacy was approved
+        self.validators.get(account)
+            .map(|v| v.is_bootstrap_validator)
+            .unwrap_or(false)
+            && self.early_candidates.get(account)
+                .map(|c| c.status == CandidacyStatus::Approved)
+                .unwrap_or(false)
+    }
+
+    /// Check if account can vote for early validators
+    /// Returns true if account is an active bootstrap validator during bootstrap era
+    pub fn can_vote_early_validator(&self, account: &AccountId, current_block: BlockNumber) -> bool {
+        Self::is_bootstrap_era(current_block) && self.is_active_at(account, current_block)
+    }
 }
 
 impl Default for ValidatorSet {
@@ -511,6 +836,34 @@ pub enum ValidatorError {
 
     #[error("Unbonding non complété")]
     UnbondingNotCompleted,
+
+    // Early validator voting errors
+    #[error("Bootstrap era ended - voting no longer allowed")]
+    BootstrapEnded,
+
+    #[error("Maximum number of validators reached ({MAX_EARLY_VALIDATORS})")]
+    MaxValidatorsReached,
+
+    #[error("Account is not a validator")]
+    NotValidator,
+
+    #[error("Candidacy already exists for this account")]
+    CandidacyExists,
+
+    #[error("Candidacy not found")]
+    CandidacyNotFound,
+
+    #[error("Candidacy has expired")]
+    CandidacyExpired,
+
+    #[error("Candidacy is not pending")]
+    CandidacyNotPending,
+
+    #[error("Voter has already voted for this candidate")]
+    AlreadyVoted,
+
+    #[error("Insufficient votes for approval")]
+    InsufficientVotes,
 }
 
 #[cfg(test)]
@@ -772,5 +1125,258 @@ mod tests {
         let result = set.add_validator(validator2);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ValidatorError::AlreadyRegistered));
+    }
+
+    // =========================================================================
+    // EARLY VALIDATOR VOTING TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_early_validator_candidacy() {
+        let mut set = ValidatorSet::new();
+
+        // Add bootstrap validator
+        let bootstrap = AccountId::from_bytes([1; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(bootstrap, 0)).unwrap();
+
+        // Propose candidate
+        let candidate = AccountId::from_bytes([2; 32]);
+        let result = set.propose_early_validator(candidate, bootstrap, 100);
+        assert!(result.is_ok());
+
+        // Check candidacy exists
+        let candidacy = set.get_candidate(&candidate);
+        assert!(candidacy.is_some());
+        let candidacy = candidacy.unwrap();
+        assert_eq!(candidacy.candidate, candidate);
+        assert_eq!(candidacy.proposer, bootstrap);
+        assert_eq!(candidacy.status, CandidacyStatus::Pending);
+        assert_eq!(candidacy.vote_count(), 1); // Proposer auto-votes
+    }
+
+    #[test]
+    fn test_early_validator_voting_thresholds() {
+        let mut set = ValidatorSet::new();
+
+        // With 1 validator: need 1 vote
+        let v1 = AccountId::from_bytes([1; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(v1, 0)).unwrap();
+        assert_eq!(set.votes_required_for_new_validator(), 1);
+
+        // With 2 validators: still need 1 vote
+        let v2 = AccountId::from_bytes([2; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(v2, 1)).unwrap();
+        assert_eq!(set.votes_required_for_new_validator(), 1);
+
+        // With 3 validators: need 3 votes
+        let v3 = AccountId::from_bytes([3; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(v3, 2)).unwrap();
+        assert_eq!(set.votes_required_for_new_validator(), 3);
+
+        // Add more validators
+        for i in 4..=6 {
+            let vi = AccountId::from_bytes([i as u8; 32]);
+            set.add_validator(ValidatorInfo::new_bootstrap(vi, i as u64)).unwrap();
+        }
+        assert_eq!(set.votes_required_for_new_validator(), 4); // 6 validators: need 4
+
+        // Add more to reach 11+
+        for i in 7..=11 {
+            let vi = AccountId::from_bytes([i as u8; 32]);
+            set.add_validator(ValidatorInfo::new_bootstrap(vi, i as u64)).unwrap();
+        }
+        assert_eq!(set.votes_required_for_new_validator(), 5); // 11 validators: need 5
+    }
+
+    #[test]
+    fn test_early_validator_vote_and_approve() {
+        let mut set = ValidatorSet::new();
+
+        // Add bootstrap validator
+        let bootstrap = AccountId::from_bytes([1; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(bootstrap, 0)).unwrap();
+
+        // With 1 validator, only 1 vote needed
+        let candidate = AccountId::from_bytes([10; 32]);
+        set.propose_early_validator(candidate, bootstrap, 100).unwrap();
+
+        // Proposer auto-voted, so quorum should be reached
+        let candidacy = set.get_candidate(&candidate).unwrap();
+        assert!(candidacy.has_quorum());
+
+        // Approve
+        let result = set.approve_early_validator(candidate, 101);
+        assert!(result.is_ok());
+
+        // Candidate should now be a validator
+        assert!(set.validators.contains_key(&candidate));
+        assert!(set.is_active(&candidate));
+
+        // Candidacy should be approved
+        let candidacy = set.get_candidate(&candidate).unwrap();
+        assert_eq!(candidacy.status, CandidacyStatus::Approved);
+    }
+
+    #[test]
+    fn test_early_validator_multiple_votes_required() {
+        let mut set = ValidatorSet::new();
+
+        // Add 3 bootstrap validators (so we need 3 votes)
+        let v1 = AccountId::from_bytes([1; 32]);
+        let v2 = AccountId::from_bytes([2; 32]);
+        let v3 = AccountId::from_bytes([3; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(v1, 0)).unwrap();
+        set.add_validator(ValidatorInfo::new_bootstrap(v2, 1)).unwrap();
+        set.add_validator(ValidatorInfo::new_bootstrap(v3, 2)).unwrap();
+
+        // Propose candidate
+        let candidate = AccountId::from_bytes([10; 32]);
+        set.propose_early_validator(candidate, v1, 100).unwrap();
+
+        // V1 auto-voted, so 1/3 votes
+        let candidacy = set.get_candidate(&candidate).unwrap();
+        assert_eq!(candidacy.vote_count(), 1);
+        assert!(!candidacy.has_quorum());
+
+        // V2 votes
+        let has_quorum = set.vote_early_validator(candidate, v2, 101).unwrap();
+        assert!(!has_quorum);
+        assert_eq!(set.get_candidate(&candidate).unwrap().vote_count(), 2);
+
+        // V3 votes - now has quorum
+        let has_quorum = set.vote_early_validator(candidate, v3, 102).unwrap();
+        assert!(has_quorum);
+
+        // Approve
+        set.approve_early_validator(candidate, 103).unwrap();
+        assert!(set.is_active(&candidate));
+    }
+
+    #[test]
+    fn test_early_validator_cannot_vote_twice() {
+        let mut set = ValidatorSet::new();
+
+        let v1 = AccountId::from_bytes([1; 32]);
+        let v2 = AccountId::from_bytes([2; 32]);
+        let v3 = AccountId::from_bytes([3; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(v1, 0)).unwrap();
+        set.add_validator(ValidatorInfo::new_bootstrap(v2, 1)).unwrap();
+        set.add_validator(ValidatorInfo::new_bootstrap(v3, 2)).unwrap();
+
+        let candidate = AccountId::from_bytes([10; 32]);
+        set.propose_early_validator(candidate, v1, 100).unwrap();
+
+        // V1 already voted (as proposer), so can't vote again
+        let result = set.vote_early_validator(candidate, v1, 101);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ValidatorError::AlreadyVoted));
+    }
+
+    #[test]
+    fn test_early_validator_bootstrap_era_required() {
+        let mut set = ValidatorSet::new();
+
+        let bootstrap = AccountId::from_bytes([1; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(bootstrap, 0)).unwrap();
+
+        let candidate = AccountId::from_bytes([10; 32]);
+
+        // Try to propose after bootstrap era
+        let result = set.propose_early_validator(candidate, bootstrap, BOOTSTRAP_ERA_BLOCKS + 1);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ValidatorError::BootstrapEnded));
+    }
+
+    #[test]
+    fn test_early_validator_candidacy_expiration() {
+        let mut set = ValidatorSet::new();
+
+        let v1 = AccountId::from_bytes([1; 32]);
+        let v2 = AccountId::from_bytes([2; 32]);
+        let v3 = AccountId::from_bytes([3; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(v1, 0)).unwrap();
+        set.add_validator(ValidatorInfo::new_bootstrap(v2, 1)).unwrap();
+        set.add_validator(ValidatorInfo::new_bootstrap(v3, 2)).unwrap();
+
+        let candidate = AccountId::from_bytes([10; 32]);
+        set.propose_early_validator(candidate, v1, 100).unwrap();
+
+        // Try to vote after expiration
+        let result = set.vote_early_validator(candidate, v2, 100 + CANDIDACY_EXPIRATION + 1);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ValidatorError::CandidacyExpired));
+    }
+
+    #[test]
+    fn test_early_validator_non_validator_cannot_propose() {
+        let mut set = ValidatorSet::new();
+
+        let bootstrap = AccountId::from_bytes([1; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(bootstrap, 0)).unwrap();
+
+        // Non-validator tries to propose
+        let non_validator = AccountId::from_bytes([99; 32]);
+        let candidate = AccountId::from_bytes([10; 32]);
+
+        let result = set.propose_early_validator(candidate, non_validator, 100);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ValidatorError::NotValidator));
+    }
+
+    #[test]
+    fn test_early_validator_pending_candidates() {
+        let mut set = ValidatorSet::new();
+
+        let bootstrap = AccountId::from_bytes([1; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(bootstrap, 0)).unwrap();
+
+        // Create multiple candidates
+        let c1 = AccountId::from_bytes([10; 32]);
+        let c2 = AccountId::from_bytes([11; 32]);
+
+        set.propose_early_validator(c1, bootstrap, 100).unwrap();
+        set.propose_early_validator(c2, bootstrap, 101).unwrap();
+
+        // Both should be pending
+        let pending = set.pending_candidates();
+        assert_eq!(pending.len(), 2);
+
+        // Approve one
+        set.approve_early_validator(c1, 102).unwrap();
+
+        // Now only one pending
+        let pending = set.pending_candidates();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].candidate, c2);
+    }
+
+    #[test]
+    fn test_cleanup_expired_candidacies() {
+        let mut set = ValidatorSet::new();
+
+        let v1 = AccountId::from_bytes([1; 32]);
+        let v2 = AccountId::from_bytes([2; 32]);
+        let v3 = AccountId::from_bytes([3; 32]);
+        set.add_validator(ValidatorInfo::new_bootstrap(v1, 0)).unwrap();
+        set.add_validator(ValidatorInfo::new_bootstrap(v2, 1)).unwrap();
+        set.add_validator(ValidatorInfo::new_bootstrap(v3, 2)).unwrap();
+
+        let candidate = AccountId::from_bytes([10; 32]);
+        set.propose_early_validator(candidate, v1, 100).unwrap();
+
+        // Before expiration: should be pending
+        assert_eq!(set.pending_candidates().len(), 1);
+
+        // After expiration: cleanup should mark it expired
+        let expired = set.cleanup_expired_candidacies(100 + CANDIDACY_EXPIRATION + 1);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0], candidate);
+
+        // Now no pending candidates
+        assert_eq!(set.pending_candidates().len(), 0);
+
+        // Candidacy should be marked expired
+        let candidacy = set.get_candidate(&candidate).unwrap();
+        assert_eq!(candidacy.status, CandidacyStatus::Expired);
     }
 }

@@ -304,14 +304,28 @@ fn main_menu(term: &Term, keys: &WalletKeys, client: &RpcClient, storage: &Walle
         // Show account info
         print_account_header(keys);
 
-        // Menu options
-        let choices = vec![
-            "💰 Check Balance",
-            "📤 Send KRAT",
-            "📜 Transaction History",
-            "⚙️  Settings",
-            "🚪 Exit",
-        ];
+        // Check if we're in bootstrap era (show community menu to everyone during bootstrap)
+        let is_bootstrap = check_is_bootstrap(client);
+
+        // Build menu choices - always show community during bootstrap era
+        let choices = if is_bootstrap {
+            vec![
+                "💰 Check Balance",
+                "📤 Send KRAT",
+                "📜 Transaction History",
+                "🏛️  Community (Early Validators)",
+                "⚙️  Settings",
+                "🚪 Exit",
+            ]
+        } else {
+            vec![
+                "💰 Check Balance",
+                "📤 Send KRAT",
+                "📜 Transaction History",
+                "⚙️  Settings",
+                "🚪 Exit",
+            ]
+        };
 
         let selection = Select::with_theme(&theme)
             .with_prompt("What would you like to do?")
@@ -320,19 +334,59 @@ fn main_menu(term: &Term, keys: &WalletKeys, client: &RpcClient, storage: &Walle
             .interact()
             .unwrap();
 
-        match selection {
-            0 => check_balance(term, keys, client),
-            1 => send_krat(term, keys, client, storage),
-            2 => transaction_history(term, keys, client, storage),
-            3 => settings(term, keys, storage),
-            4 => {
-                println!();
-                println!("{}", style("  👋 Goodbye!").cyan());
-                println!();
-                break;
+        // Map selection to action
+        if is_bootstrap {
+            match selection {
+                0 => check_balance(term, keys, client),
+                1 => send_krat(term, keys, client, storage),
+                2 => transaction_history(term, keys, client, storage),
+                3 => early_validator_menu(term, keys, client),
+                4 => settings(term, keys, storage),
+                5 => {
+                    println!();
+                    println!("{}", style("  👋 Goodbye!").cyan());
+                    println!();
+                    break;
+                }
+                _ => {}
             }
-            _ => {}
+        } else {
+            match selection {
+                0 => check_balance(term, keys, client),
+                1 => send_krat(term, keys, client, storage),
+                2 => transaction_history(term, keys, client, storage),
+                3 => settings(term, keys, storage),
+                4 => {
+                    println!();
+                    println!("{}", style("  👋 Goodbye!").cyan());
+                    println!();
+                    break;
+                }
+                _ => {}
+            }
         }
+    }
+}
+
+/// Check if we're in bootstrap era
+fn check_is_bootstrap(client: &RpcClient) -> bool {
+    match client.get_early_voting_status() {
+        Ok(status) => {
+            eprintln!("[DEBUG] Bootstrap status: is_bootstrap_era = {}", status.is_bootstrap_era);
+            status.is_bootstrap_era
+        }
+        Err(e) => {
+            eprintln!("[DEBUG] Failed to get bootstrap status: {}", e);
+            false // Assume not bootstrap if RPC fails
+        }
+    }
+}
+
+/// Check if the current wallet is an active validator
+fn check_if_validator(keys: &WalletKeys, client: &RpcClient) -> bool {
+    match client.can_vote(&keys.account_id_hex()) {
+        Ok(response) => response.is_validator,
+        Err(_) => false, // Assume not a validator if RPC fails
     }
 }
 
@@ -679,6 +733,560 @@ fn update_pending_transactions(history: &mut crate::types::TransactionHistory, c
                 }
             }
         }
+    }
+}
+
+// =============================================================================
+// EARLY VALIDATOR VOTING SECTION
+// =============================================================================
+
+/// Early validator voting menu (shown to everyone during bootstrap, but only validators can vote)
+fn early_validator_menu(term: &Term, keys: &WalletKeys, client: &RpcClient) {
+    let theme = ColorfulTheme::default();
+
+    loop {
+        let _ = term.clear_screen();
+        print_banner();
+
+        println!("{}", style("  🏛️  Community - Early Validators").cyan().bold());
+        println!();
+
+        // Show voting status
+        if let Err(e) = print_voting_status(client) {
+            eprintln!("{}", style(format!("  ❌ {}", e)).red());
+            wait_for_enter();
+            return;
+        }
+
+        // Check if user is a validator (can propose/vote)
+        let is_validator = check_if_validator(keys, client);
+
+        if is_validator {
+            println!("  {} {}", style("Your status:").dim(), style("ACTIVE VALIDATOR").green().bold());
+            println!("  {}", style("You can propose candidates and vote.").dim());
+        } else {
+            println!("  {} {}", style("Your status:").dim(), style("OBSERVER").yellow());
+            println!("  {}", style("You can view candidates but cannot vote.").dim());
+        }
+        println!();
+
+        // Build menu based on validator status
+        let choices: Vec<&str> = if is_validator {
+            vec![
+                "📋 View Pending Candidates",
+                "➕ Propose New Validator",
+                "✅ Vote for Candidate",
+                "🔍 Check Candidate Status",
+                "⬅️  Back to Main Menu",
+            ]
+        } else {
+            vec![
+                "📋 View Pending Candidates",
+                "🔍 Check Candidate Status",
+                "⬅️  Back to Main Menu",
+            ]
+        };
+
+        let selection = Select::with_theme(&theme)
+            .with_prompt("Community Actions")
+            .items(&choices)
+            .default(0)
+            .interact()
+            .unwrap();
+
+        if is_validator {
+            match selection {
+                0 => view_pending_candidates(term, client),
+                1 => propose_validator(term, keys, client),
+                2 => vote_for_candidate(term, keys, client),
+                3 => check_candidate_status(term, client),
+                4 => return,
+                _ => {}
+            }
+        } else {
+            match selection {
+                0 => view_pending_candidates(term, client),
+                1 => check_candidate_status(term, client),
+                2 => return,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Print current voting status
+fn print_voting_status(client: &RpcClient) -> Result<(), String> {
+    let status = client.get_early_voting_status()?;
+
+    println!("  {}", style("Bootstrap Era Status").yellow().bold());
+    println!("  {}", style("─".repeat(40)).dim());
+
+    if status.is_bootstrap_era {
+        println!(
+            "  {} {}",
+            style("Status:").dim(),
+            style("ACTIVE").green().bold()
+        );
+        println!(
+            "  {} {} / {} blocks remaining",
+            style("Progress:").dim(),
+            status.current_block,
+            status.bootstrap_end_block
+        );
+    } else {
+        println!(
+            "  {} {}",
+            style("Status:").dim(),
+            style("ENDED").red().bold()
+        );
+        println!();
+        println!(
+            "  {}",
+            style("Bootstrap era has ended. No more early validators can be added.").yellow()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "  {} {} / {} validators",
+        style("Validators:").dim(),
+        status.validator_count,
+        status.max_validators
+    );
+    println!(
+        "  {} {} votes needed for next validator",
+        style("Threshold:").dim(),
+        status.votes_required
+    );
+    println!(
+        "  {} {} pending",
+        style("Candidates:").dim(),
+        status.pending_candidates
+    );
+    println!();
+
+    Ok(())
+}
+
+/// View pending candidates
+fn view_pending_candidates(term: &Term, client: &RpcClient) {
+    let _ = term.clear_screen();
+    print_banner();
+
+    println!("{}", style("  📋 Pending Candidates").cyan().bold());
+    println!();
+
+    let spinner = create_spinner("Fetching candidates...");
+
+    match client.get_pending_candidates() {
+        Ok(response) => {
+            spinner.finish_and_clear();
+
+            if response.candidates.is_empty() {
+                println!(
+                    "  {}",
+                    style("No pending candidates at this time.").dim()
+                );
+            } else {
+                println!(
+                    "  {} {}",
+                    style("Found").dim(),
+                    style(format!("{} candidates", response.count)).white()
+                );
+                println!();
+
+                for (i, candidate) in response.candidates.iter().enumerate() {
+                    let progress = format!(
+                        "{}/{}",
+                        candidate.vote_count, candidate.votes_required
+                    );
+                    let status_icon: String = if candidate.has_quorum {
+                        format!("{}", style("✓ READY").green())
+                    } else {
+                        format!("{}", style(&progress).yellow())
+                    };
+
+                    println!(
+                        "  {} {} {}",
+                        style(format!("{}.", i + 1)).dim(),
+                        format_address_short(&candidate.candidate),
+                        status_icon
+                    );
+                    println!(
+                        "      {} {}",
+                        style("Proposed by:").dim(),
+                        format_address_short(&candidate.proposer)
+                    );
+                    println!(
+                        "      {} {:?}",
+                        style("Voters:").dim(),
+                        candidate
+                            .voters
+                            .iter()
+                            .map(|v| format_address_short(v))
+                            .collect::<Vec<_>>()
+                    );
+                    println!();
+                }
+            }
+        }
+        Err(e) => {
+            spinner.finish_and_clear();
+            eprintln!("{}", style(format!("  ❌ Failed: {}", e)).red());
+        }
+    }
+
+    wait_for_enter();
+}
+
+/// Propose a new validator
+fn propose_validator(term: &Term, keys: &WalletKeys, client: &RpcClient) {
+    let _ = term.clear_screen();
+    print_banner();
+
+    println!("{}", style("  ➕ Propose New Validator").cyan().bold());
+    println!();
+
+    let theme = ColorfulTheme::default();
+
+    // Get candidate address
+    let candidate_str: String = Input::with_theme(&theme)
+        .with_prompt("Candidate address (0x...)")
+        .validate_with(|input: &String| -> Result<(), &str> {
+            let hex = input.strip_prefix("0x").unwrap_or(input);
+            if hex.len() != 64 {
+                return Err("Address must be 64 hex characters");
+            }
+            if hex::decode(hex).is_err() {
+                return Err("Invalid hex address");
+            }
+            Ok(())
+        })
+        .interact_text()
+        .unwrap();
+
+    // Parse candidate bytes
+    let candidate_hex = candidate_str.strip_prefix("0x").unwrap_or(&candidate_str);
+    let candidate_bytes = hex::decode(candidate_hex).unwrap();
+    let mut candidate_array = [0u8; 32];
+    candidate_array.copy_from_slice(&candidate_bytes);
+
+    // Confirm
+    println!();
+    println!("{}", style("  Proposal Summary:").yellow());
+    println!("  ├── Candidate: {}", style(&candidate_str).white());
+    println!("  └── Fee: ~0.00005 KRAT (50,000 units)");
+    println!();
+
+    let confirmed = Confirm::with_theme(&theme)
+        .with_prompt("Submit this proposal?")
+        .default(false)
+        .interact()
+        .unwrap();
+
+    if !confirmed {
+        println!();
+        println!("{}", style("  ❌ Proposal cancelled").yellow());
+        wait_for_enter();
+        return;
+    }
+
+    // Get nonce and submit
+    let spinner = create_spinner("Submitting proposal...");
+
+    let nonce = match client.get_nonce(&keys.account_id_hex()) {
+        Ok(n) => n,
+        Err(e) => {
+            spinner.finish_and_clear();
+            eprintln!("{}", style(format!("  ❌ Failed to get nonce: {}", e)).red());
+            wait_for_enter();
+            return;
+        }
+    };
+
+    let signed_tx = keys.create_propose_early_validator(candidate_array, nonce);
+
+    match client.submit_propose_early_validator(&signed_tx) {
+        Ok(result) => {
+            spinner.finish_and_clear();
+            println!();
+            println!("{}", style("  ✅ Proposal submitted successfully!").green());
+            println!();
+            println!("  {} {}", style("Hash:").dim(), style(&result.hash).cyan());
+            println!("  {} {}", style("Status:").dim(), result.message);
+        }
+        Err(e) => {
+            spinner.finish_and_clear();
+            eprintln!("{}", style(format!("  ❌ Proposal failed: {}", e)).red());
+        }
+    }
+
+    println!();
+    wait_for_enter();
+}
+
+/// Vote for a candidate
+fn vote_for_candidate(term: &Term, keys: &WalletKeys, client: &RpcClient) {
+    let _ = term.clear_screen();
+    print_banner();
+
+    println!("{}", style("  ✅ Vote for Candidate").cyan().bold());
+    println!();
+
+    // First show pending candidates
+    let spinner = create_spinner("Loading candidates...");
+
+    let candidates = match client.get_pending_candidates() {
+        Ok(response) => {
+            spinner.finish_and_clear();
+            response.candidates
+        }
+        Err(e) => {
+            spinner.finish_and_clear();
+            eprintln!("{}", style(format!("  ❌ Failed to load candidates: {}", e)).red());
+            wait_for_enter();
+            return;
+        }
+    };
+
+    if candidates.is_empty() {
+        println!(
+            "  {}",
+            style("No pending candidates to vote for.").dim()
+        );
+        wait_for_enter();
+        return;
+    }
+
+    let theme = ColorfulTheme::default();
+
+    // Build selection list
+    let choices: Vec<String> = candidates
+        .iter()
+        .map(|c| {
+            format!(
+                "{} ({}/{} votes)",
+                format_address_short(&c.candidate),
+                c.vote_count,
+                c.votes_required
+            )
+        })
+        .chain(std::iter::once("Cancel".to_string()))
+        .collect();
+
+    let selection = Select::with_theme(&theme)
+        .with_prompt("Select candidate to vote for")
+        .items(&choices)
+        .default(0)
+        .interact()
+        .unwrap();
+
+    if selection >= candidates.len() {
+        return; // Cancel selected
+    }
+
+    let selected = &candidates[selection];
+
+    // Check if already voted
+    let my_address = format!("0x{}", keys.account_id_hex());
+    if selected.voters.iter().any(|v| v.eq_ignore_ascii_case(&my_address)) {
+        println!();
+        println!(
+            "{}",
+            style("  ⚠️  You have already voted for this candidate.").yellow()
+        );
+        wait_for_enter();
+        return;
+    }
+
+    // Parse candidate bytes
+    let candidate_hex = selected.candidate.strip_prefix("0x").unwrap_or(&selected.candidate);
+    let candidate_bytes = hex::decode(candidate_hex).unwrap();
+    let mut candidate_array = [0u8; 32];
+    candidate_array.copy_from_slice(&candidate_bytes);
+
+    // Confirm
+    println!();
+    println!("{}", style("  Vote Summary:").yellow());
+    println!("  ├── Candidate: {}", format_address_short(&selected.candidate));
+    println!(
+        "  ├── Current votes: {}/{}",
+        selected.vote_count, selected.votes_required
+    );
+    println!("  └── Fee: ~0.00001 KRAT (10,000 units)");
+    println!();
+
+    let confirmed = Confirm::with_theme(&theme)
+        .with_prompt("Submit this vote?")
+        .default(false)
+        .interact()
+        .unwrap();
+
+    if !confirmed {
+        println!();
+        println!("{}", style("  ❌ Vote cancelled").yellow());
+        wait_for_enter();
+        return;
+    }
+
+    // Get nonce and submit
+    let spinner = create_spinner("Submitting vote...");
+
+    let nonce = match client.get_nonce(&keys.account_id_hex()) {
+        Ok(n) => n,
+        Err(e) => {
+            spinner.finish_and_clear();
+            eprintln!("{}", style(format!("  ❌ Failed to get nonce: {}", e)).red());
+            wait_for_enter();
+            return;
+        }
+    };
+
+    let signed_tx = keys.create_vote_early_validator(candidate_array, nonce);
+
+    match client.submit_vote_early_validator(&signed_tx) {
+        Ok(result) => {
+            spinner.finish_and_clear();
+            println!();
+            println!("{}", style("  ✅ Vote submitted successfully!").green());
+            println!();
+            println!("  {} {}", style("Hash:").dim(), style(&result.hash).cyan());
+            println!("  {} {}", style("Status:").dim(), result.message);
+
+            // Check if this was the deciding vote
+            if selected.vote_count + 1 >= selected.votes_required {
+                println!();
+                println!(
+                    "{}",
+                    style("  🎉 This was the deciding vote! Candidate will be approved.").green().bold()
+                );
+            }
+        }
+        Err(e) => {
+            spinner.finish_and_clear();
+            eprintln!("{}", style(format!("  ❌ Vote failed: {}", e)).red());
+        }
+    }
+
+    println!();
+    wait_for_enter();
+}
+
+/// Check status of a specific candidate
+fn check_candidate_status(term: &Term, client: &RpcClient) {
+    let _ = term.clear_screen();
+    print_banner();
+
+    println!("{}", style("  🔍 Check Candidate Status").cyan().bold());
+    println!();
+
+    let theme = ColorfulTheme::default();
+
+    // Get candidate address
+    let candidate_str: String = Input::with_theme(&theme)
+        .with_prompt("Candidate address (0x...)")
+        .validate_with(|input: &String| -> Result<(), &str> {
+            let hex = input.strip_prefix("0x").unwrap_or(input);
+            if hex.len() != 64 {
+                return Err("Address must be 64 hex characters");
+            }
+            if hex::decode(hex).is_err() {
+                return Err("Invalid hex address");
+            }
+            Ok(())
+        })
+        .interact_text()
+        .unwrap();
+
+    let spinner = create_spinner("Checking status...");
+
+    match client.get_candidate_votes(&candidate_str) {
+        Ok(response) => {
+            spinner.finish_and_clear();
+            println!();
+
+            if response.status == "not_found" {
+                println!(
+                    "  {}",
+                    style("No candidacy found for this address.").dim()
+                );
+            } else {
+                println!("  {}", style("Candidate Information").yellow().bold());
+                println!("  {}", style("─".repeat(40)).dim());
+                println!(
+                    "  {} {}",
+                    style("Address:").dim(),
+                    style(&response.candidate).white()
+                );
+
+                let status_styled: String = match response.status.as_str() {
+                    "Pending" => format!("{}", style("PENDING").yellow()),
+                    "Approved" => format!("{}", style("APPROVED").green()),
+                    "Rejected" => format!("{}", style("REJECTED").red()),
+                    "Expired" => format!("{}", style("EXPIRED").dim()),
+                    _ => format!("{}", style(&response.status).white()),
+                };
+                println!("  {} {}", style("Status:").dim(), status_styled);
+
+                if let Some(proposer) = &response.proposer {
+                    println!(
+                        "  {} {}",
+                        style("Proposer:").dim(),
+                        format_address_short(proposer)
+                    );
+                }
+
+                if let (Some(votes), Some(required)) = (response.vote_count, response.votes_required) {
+                    println!(
+                        "  {} {}/{}",
+                        style("Votes:").dim(),
+                        votes,
+                        required
+                    );
+                }
+
+                if let Some(has_quorum) = response.has_quorum {
+                    let quorum_text = if has_quorum {
+                        style("YES").green()
+                    } else {
+                        style("NO").red()
+                    };
+                    println!("  {} {}", style("Has quorum:").dim(), quorum_text);
+                }
+
+                if !response.voters.is_empty() {
+                    println!("  {} ", style("Voters:").dim());
+                    for voter in &response.voters {
+                        println!("    - {}", format_address_short(voter));
+                    }
+                }
+
+                if let Some(approved_at) = response.approved_at {
+                    println!(
+                        "  {} block #{}",
+                        style("Approved at:").dim(),
+                        approved_at
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            spinner.finish_and_clear();
+            eprintln!("{}", style(format!("  ❌ Failed: {}", e)).red());
+        }
+    }
+
+    println!();
+    wait_for_enter();
+}
+
+/// Format address for display (shortened)
+fn format_address_short(address: &str) -> String {
+    let addr = address.strip_prefix("0x").unwrap_or(address);
+    if addr.len() > 16 {
+        format!("0x{}...{}", &addr[..8], &addr[addr.len() - 8..])
+    } else {
+        format!("0x{}", addr)
     }
 }
 
