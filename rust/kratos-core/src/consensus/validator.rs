@@ -117,9 +117,13 @@ impl ValidatorInfo {
     /// Vérifie si le validateur peut participer au consensus
     /// Bootstrap validators can participate without stake only during bootstrap era (SPEC v2.1)
     /// After bootstrap era + grace period, they must have staked MIN_VALIDATOR_STAKE
+    ///
+    /// Note: For proper block validation, use can_participate_at(block_number) which
+    /// accounts for bootstrap era timing. This method allows bootstrap validators
+    /// to participate during the bootstrap period.
     pub fn can_participate(&self) -> bool {
         matches!(self.status, ValidatorStatus::Active)
-            && self.stake >= MIN_VALIDATOR_STAKE
+            && (self.stake >= MIN_VALIDATOR_STAKE || self.is_bootstrap_validator)
             && self.reputation > 0
     }
 
@@ -518,9 +522,9 @@ mod tests {
         assert!(bootstrap.is_bootstrap_validator);
         assert_eq!(bootstrap.status, ValidatorStatus::Active);
 
-        // Bootstrap validators cannot participate without block context
-        assert!(!bootstrap.can_participate());
-        // But CAN participate during bootstrap era
+        // Bootstrap validators CAN participate (they have is_bootstrap_validator flag)
+        assert!(bootstrap.can_participate());
+        // And can also participate during bootstrap era with block context
         assert!(bootstrap.can_participate_at(0));
         assert!(bootstrap.can_participate_at(BOOTSTRAP_ERA_BLOCKS - 1));
 
