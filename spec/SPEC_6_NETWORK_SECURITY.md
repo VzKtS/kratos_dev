@@ -392,7 +392,7 @@ pub const OFFICIAL_DNS_SEEDS: &[&str] = &[
 
 // Fallback hardcoded bootnodes (always included in resolution)
 pub const FALLBACK_BOOTNODES: &[&str] = &[
-    "/ip4/45.8.132.252/tcp/30333/p2p/12D3KooWS4DyZ6dLGmGdhnnQYqa19CUmwj5S5qdFMDMDEP3aHoUh",
+    "/ip4/45.8.132.252/tcp/30333/p2p/12D3KooWAiEmjd2mEHoXKgEBfaXkcXiv4dDiyecowZQ47fZRztfY",
 ];
 
 // Default P2P port
@@ -403,7 +403,7 @@ pub const DEFAULT_P2P_PORT: u16 = 30333;
 
 | Node | IP | Peer ID | Operator |
 |------|-----|---------|----------|
-| Dev VPS | 45.8.132.252 | 12D3KooWS4DyZ6... | KratOs Dev |
+| Genesis Node | 45.8.132.252 | 12D3KooWAiEmjd2m... | KratOs Dev |
 
 **Note:** Additional bootstrap nodes will be added as the network grows.
 
