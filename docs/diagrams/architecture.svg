@@ -1,0 +1,170 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 700">
+  <defs>
+    <linearGradient id="nodeGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#4F46E5;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#3730A3;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="storageGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#059669;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#047857;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="networkGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#DC2626;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#B91C1C;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="walletGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#F59E0B;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#D97706;stop-opacity:1" />
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="2" dy="4" stdDeviation="3" flood-opacity="0.3"/>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="700" fill="#0F172A"/>
+
+  <!-- Title -->
+  <text x="450" y="40" text-anchor="middle" fill="#F8FAFC" font-family="Arial, sans-serif" font-size="24" font-weight="bold">KratOs Architecture</text>
+
+  <!-- External Layer - Wallet -->
+  <g filter="url(#shadow)">
+    <rect x="30" y="80" width="180" height="120" rx="10" fill="url(#walletGrad)"/>
+    <text x="120" y="115" text-anchor="middle" fill="white" font-family="Arial" font-size="14" font-weight="bold">Wallet</text>
+    <text x="120" y="140" text-anchor="middle" fill="white" font-family="Arial" font-size="11">kratos-wallet</text>
+    <line x1="50" y1="155" x2="190" y2="155" stroke="rgba(255,255,255,0.3)" stroke-width="1"/>
+    <text x="120" y="175" text-anchor="middle" fill="white" font-family="Arial" font-size="10">Ed25519 | AES-GCM</text>
+    <text x="120" y="190" text-anchor="middle" fill="white" font-family="Arial" font-size="10">JSON-RPC Client</text>
+  </g>
+
+  <!-- Arrow Wallet to RPC -->
+  <path d="M 210 140 L 280 140" stroke="#94A3B8" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  <text x="245" y="130" text-anchor="middle" fill="#94A3B8" font-family="Arial" font-size="9">HTTP</text>
+
+  <!-- Node Box (main container) -->
+  <rect x="280" y="70" width="590" height="520" rx="15" fill="none" stroke="#4F46E5" stroke-width="2" stroke-dasharray="5,5"/>
+  <text x="575" y="95" text-anchor="middle" fill="#818CF8" font-family="Arial" font-size="12">kratos-core</text>
+
+  <!-- RPC Server -->
+  <g filter="url(#shadow)">
+    <rect x="300" y="110" width="160" height="90" rx="8" fill="url(#nodeGrad)"/>
+    <text x="380" y="140" text-anchor="middle" fill="white" font-family="Arial" font-size="13" font-weight="bold">RPC Server</text>
+    <text x="380" y="160" text-anchor="middle" fill="white" font-family="Arial" font-size="10">rpc/server.rs</text>
+    <text x="380" y="180" text-anchor="middle" fill="white" font-family="Arial" font-size="10">rpc/methods.rs</text>
+  </g>
+
+  <!-- CLI Runner -->
+  <g filter="url(#shadow)">
+    <rect x="480" y="110" width="160" height="90" rx="8" fill="url(#nodeGrad)"/>
+    <text x="560" y="140" text-anchor="middle" fill="white" font-family="Arial" font-size="13" font-weight="bold">CLI Runner</text>
+    <text x="560" y="160" text-anchor="middle" fill="white" font-family="Arial" font-size="10">cli/runner.rs</text>
+    <text x="560" y="180" text-anchor="middle" fill="white" font-family="Arial" font-size="10">Event Loop</text>
+  </g>
+
+  <!-- Config -->
+  <g filter="url(#shadow)">
+    <rect x="660" y="110" width="120" height="90" rx="8" fill="#374151"/>
+    <text x="720" y="140" text-anchor="middle" fill="white" font-family="Arial" font-size="13" font-weight="bold">Config</text>
+    <text x="720" y="160" text-anchor="middle" fill="white" font-family="Arial" font-size="10">cli/config.rs</text>
+    <text x="720" y="180" text-anchor="middle" fill="white" font-family="Arial" font-size="10">NodeConfig</text>
+  </g>
+
+  <!-- Arrow RPC to Runner -->
+  <path d="M 460 155 L 480 155" stroke="#94A3B8" stroke-width="2"/>
+  <text x="470" y="145" text-anchor="middle" fill="#94A3B8" font-family="Arial" font-size="8">mpsc</text>
+
+  <!-- Node Service (central) -->
+  <g filter="url(#shadow)">
+    <rect x="380" y="230" width="200" height="100" rx="10" fill="url(#nodeGrad)"/>
+    <text x="480" y="260" text-anchor="middle" fill="white" font-family="Arial" font-size="14" font-weight="bold">NodeService</text>
+    <text x="480" y="280" text-anchor="middle" fill="white" font-family="Arial" font-size="11">node/service.rs</text>
+    <text x="480" y="300" text-anchor="middle" fill="white" font-family="Arial" font-size="10">import_block() | try_produce_block()</text>
+    <text x="480" y="315" text-anchor="middle" fill="white" font-family="Arial" font-size="10">store_produced_block()</text>
+  </g>
+
+  <!-- Arrows to NodeService -->
+  <path d="M 380 200 L 440 230" stroke="#94A3B8" stroke-width="2"/>
+  <path d="M 560 200 L 520 230" stroke="#94A3B8" stroke-width="2"/>
+
+  <!-- Block Producer -->
+  <g filter="url(#shadow)">
+    <rect x="300" y="360" width="160" height="100" rx="8" fill="url(#nodeGrad)"/>
+    <text x="380" y="390" text-anchor="middle" fill="white" font-family="Arial" font-size="13" font-weight="bold">BlockProducer</text>
+    <text x="380" y="410" text-anchor="middle" fill="white" font-family="Arial" font-size="10">node/producer.rs</text>
+    <text x="380" y="430" text-anchor="middle" fill="white" font-family="Arial" font-size="10">produce_block()</text>
+    <text x="380" y="450" text-anchor="middle" fill="white" font-family="Arial" font-size="10">is_slot_leader()</text>
+  </g>
+
+  <!-- ValidatorSet -->
+  <g filter="url(#shadow)">
+    <rect x="500" y="360" width="160" height="100" rx="8" fill="url(#nodeGrad)"/>
+    <text x="580" y="390" text-anchor="middle" fill="white" font-family="Arial" font-size="13" font-weight="bold">ValidatorSet</text>
+    <text x="580" y="410" text-anchor="middle" fill="white" font-family="Arial" font-size="10">consensus/validator.rs</text>
+    <text x="580" y="430" text-anchor="middle" fill="white" font-family="Arial" font-size="10">Early Voting</text>
+    <text x="580" y="450" text-anchor="middle" fill="white" font-family="Arial" font-size="10">VRF Selection</text>
+  </g>
+
+  <!-- Arrows from NodeService -->
+  <path d="M 440 330 L 400 360" stroke="#94A3B8" stroke-width="2"/>
+  <path d="M 520 330 L 560 360" stroke="#94A3B8" stroke-width="2"/>
+
+  <!-- Network Service -->
+  <g filter="url(#shadow)">
+    <rect x="680" y="230" width="170" height="100" rx="8" fill="url(#networkGrad)"/>
+    <text x="765" y="260" text-anchor="middle" fill="white" font-family="Arial" font-size="13" font-weight="bold">NetworkService</text>
+    <text x="765" y="280" text-anchor="middle" fill="white" font-family="Arial" font-size="10">network/service.rs</text>
+    <text x="765" y="300" text-anchor="middle" fill="white" font-family="Arial" font-size="10">libp2p | mDNS</text>
+    <text x="765" y="320" text-anchor="middle" fill="white" font-family="Arial" font-size="10">Block Gossip</text>
+  </g>
+
+  <!-- Arrow NodeService to Network -->
+  <path d="M 580 280 L 680 280" stroke="#94A3B8" stroke-width="2"/>
+
+  <!-- Storage Layer -->
+  <g filter="url(#shadow)">
+    <rect x="300" y="490" width="360" height="90" rx="10" fill="url(#storageGrad)"/>
+    <text x="480" y="520" text-anchor="middle" fill="white" font-family="Arial" font-size="14" font-weight="bold">StateBackend</text>
+    <text x="480" y="540" text-anchor="middle" fill="white" font-family="Arial" font-size="11">storage/state.rs | storage/db.rs</text>
+    <text x="480" y="560" text-anchor="middle" fill="white" font-family="Arial" font-size="10">Accounts | VC Records | Blocks | State Roots</text>
+    <text x="480" y="575" text-anchor="middle" fill="white" font-family="Arial" font-size="10">RocksDB</text>
+  </g>
+
+  <!-- Arrows to Storage -->
+  <path d="M 380 460 L 400 490" stroke="#94A3B8" stroke-width="2"/>
+  <path d="M 580 460 L 560 490" stroke="#94A3B8" stroke-width="2"/>
+
+  <!-- Genesis -->
+  <g filter="url(#shadow)">
+    <rect x="680" y="360" width="170" height="80" rx="8" fill="#374151"/>
+    <text x="765" y="390" text-anchor="middle" fill="white" font-family="Arial" font-size="13" font-weight="bold">Genesis</text>
+    <text x="765" y="410" text-anchor="middle" fill="white" font-family="Arial" font-size="10">genesis/spec.rs</text>
+    <text x="765" y="430" text-anchor="middle" fill="white" font-family="Arial" font-size="10">GenesisSpec | Build</text>
+  </g>
+
+  <!-- Types -->
+  <g filter="url(#shadow)">
+    <rect x="680" y="460" width="170" height="80" rx="8" fill="#374151"/>
+    <text x="765" y="490" text-anchor="middle" fill="white" font-family="Arial" font-size="13" font-weight="bold">Types</text>
+    <text x="765" y="510" text-anchor="middle" fill="white" font-family="Arial" font-size="10">types/*.rs</text>
+    <text x="765" y="530" text-anchor="middle" fill="white" font-family="Arial" font-size="10">Block | Transaction | AccountId</text>
+  </g>
+
+  <!-- Legend -->
+  <rect x="30" y="600" width="200" height="90" rx="8" fill="#1E293B"/>
+  <text x="130" y="625" text-anchor="middle" fill="#F8FAFC" font-family="Arial" font-size="12" font-weight="bold">Legend</text>
+  <rect x="45" y="640" width="20" height="12" rx="2" fill="url(#nodeGrad)"/>
+  <text x="75" y="650" fill="#94A3B8" font-family="Arial" font-size="10">Node Core</text>
+  <rect x="130" y="640" width="20" height="12" rx="2" fill="url(#storageGrad)"/>
+  <text x="160" y="650" fill="#94A3B8" font-family="Arial" font-size="10">Storage</text>
+  <rect x="45" y="660" width="20" height="12" rx="2" fill="url(#networkGrad)"/>
+  <text x="75" y="670" fill="#94A3B8" font-family="Arial" font-size="10">Network</text>
+  <rect x="130" y="660" width="20" height="12" rx="2" fill="url(#walletGrad)"/>
+  <text x="160" y="670" fill="#94A3B8" font-family="Arial" font-size="10">Wallet</text>
+
+  <!-- Arrowhead marker -->
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94A3B8"/>
+    </marker>
+  </defs>
+</svg>

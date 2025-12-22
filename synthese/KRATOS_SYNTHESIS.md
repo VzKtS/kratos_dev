@@ -1812,7 +1812,61 @@ storage.initialize_bootstrap_vc(...);  // Reuse existing lock
 
 ---
 
-## 31. Document History
+## 31. Sync Request Rate-Limiting
+
+### Problem
+
+During block synchronization, nodes were overwhelming peers with too many concurrent requests, causing libp2p to drop inbound streams:
+
+```
+WARN libp2p_request_response::handler: Dropping inbound stream because we are at capacity
+```
+
+This happened because:
+1. libp2p request-response default capacity is only 10 concurrent streams
+2. Each gossip block received during sync triggered `maybe_start_sync()`
+3. This created an avalanche of sync requests to the same peer
+
+### Solution
+
+Two fixes were applied:
+
+**1. Increased libp2p capacity** (`network/behaviour.rs:98-105`):
+
+```rust
+request_response::Config::default()
+    .with_request_timeout(std::time::Duration::from_secs(30))
+    .with_max_concurrent_streams(128), // Increased from default 10
+```
+
+**2. Rate-limited sync requests** (`network/service.rs:446-476`):
+
+```rust
+// Rate limit: max 1 sync request per 500ms, max 3 pending requests
+const MIN_SYNC_INTERVAL_MS: u64 = 500;
+const MAX_PENDING_SYNC_REQUESTS: u32 = 3;
+
+let elapsed = self.last_sync_request.elapsed();
+if elapsed.as_millis() < MIN_SYNC_INTERVAL_MS as u128 {
+    return; // Rate-limited
+}
+if self.pending_sync_requests >= MAX_PENDING_SYNC_REQUESTS {
+    return; // Too many pending
+}
+```
+
+### Result
+
+- Sync requests are throttled to prevent peer overload
+- Pending request counter tracks in-flight sync requests
+- Counter decremented on response or failure
+- Peers can serve sync requests without dropping streams
+
+**Source:** `network/behaviour.rs:98-105`, `network/service.rs:446-476`, `network/service.rs:836-837`
+
+---
+
+## 32. Document History
 
 | Date | Version | Change |
 |------|---------|--------|

@@ -1184,6 +1184,14 @@ impl BlockProducer {
                 // Fee burn (30% of fees) - simply not credited to anyone
                 // Creates deflationary pressure when network is actively used
 
+                // Log reward with validator address for debugging
+                let reward_krat = total_validator_reward / KRAT;
+                let reward_frac = (total_validator_reward % KRAT) / 1_000_000_000; // 3 decimals
+                info!(
+                    "💰 Reward: +{}.{:03} KRAT → 0x{}",
+                    reward_krat, reward_frac, hex::encode(validator_id.as_bytes())
+                );
+
                 debug!(
                     "Rewards distributed: block_reward={} (VC bonus from {} VC), fee_validator={}, fee_burn={}, fee_treasury={}",
                     block_reward_with_bonus, validator_vc, fee_to_validator, fee_burn, fee_to_treasury
@@ -1260,11 +1268,19 @@ impl BlockProducer {
         let tx_count = block.body.transactions.len();
         let total_fees: Balance = execution_results.iter().map(|r| r.fee_paid).sum();
 
-        // Calculate rewards for logging
-        // Block reward: 100% to validator
+        // Calculate rewards for logging (must match actual reward calculation)
+        // Block reward: 100% to validator with VC bonus
         // Fees: 60% validator, 30% burn, 10% treasury
         let metrics = self.get_default_metrics();
-        let block_reward = self.calculate_block_reward(&metrics, epoch);
+        let base_block_reward = self.calculate_block_reward(&metrics, epoch);
+
+        // Get validator's VC for bonus calculation
+        let validator_vc = {
+            let state_guard = state.read().await;
+            state_guard.get_total_vc(&validator_id).unwrap_or(0)
+        };
+        let block_reward = self.apply_vc_bonus(base_block_reward, validator_vc);
+
         let (fee_to_validator, _, _) = self.distribute_rewards(total_fees);
         let total_validator_reward = block_reward.saturating_add(fee_to_validator);
 
@@ -1501,9 +1517,12 @@ pub fn apply_block_rewards_for_import(
             .map_err(|e| format!("Set treasury account: {:?}", e))?;
     }
 
+    // Log reward reconstruction (not new rewards, just rebuilding state to match producer)
+    let reward_krat = total_validator_reward / KRAT;
+    let reward_frac = (total_validator_reward % KRAT) / 1_000_000_000; // 3 decimals
     debug!(
-        "Import rewards: author={}, block_reward={} (with VC bonus from {} VC), fee_share={}, total={}",
-        author, block_reward_with_bonus, validator_vc, fee_to_validator, total_validator_reward
+        "📥 State rebuild: credited +{}.{:03} KRAT to author 0x{} (matching producer's state)",
+        reward_krat, reward_frac, hex::encode(author.as_bytes())
     );
 
     Ok(total_validator_reward)

@@ -1,12 +1,13 @@
 # SPEC 6: Network Security States
 
-**Version:** 1.2
+**Version:** 1.3
 **Status:** Normative
-**Last Updated:** 2025-12-21
+**Last Updated:** 2025-12-22
 
 ### Changelog
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.3 | 2025-12-22 | Added §17 libp2p Capacity, §18 Sync Rate-Limiting |
 | 1.2 | 2025-12-21 | Added §16 RPC Channel Architecture |
 | 1.1 | 2025-12-21 | Added §12-15 (DNS Seeds, Identity, Sync, Genesis) |
 | 1.0 | 2025-12-19 | Initial specification |
@@ -640,7 +641,103 @@ To add a new RPC method:
 
 ---
 
-## 17. Related Specifications
+## 17. libp2p Request-Response Capacity
+
+### 17.1 The Problem
+
+During block synchronization, the default libp2p request-response capacity (10 concurrent streams) is insufficient. This causes dropped requests:
+
+```
+WARN libp2p_request_response::handler: Dropping inbound stream because we are at capacity
+```
+
+### 17.2 Solution
+
+Increase the maximum concurrent streams to 128:
+
+```rust
+let request_response = request_response::Behaviour::new(
+    vec![(StreamProtocol::new(KRATOS_PROTOCOL), ProtocolSupport::Full)],
+    request_response::Config::default()
+        .with_request_timeout(std::time::Duration::from_secs(30))
+        .with_max_concurrent_streams(128),  // Increased from default 10
+);
+```
+
+### 17.3 Capacity Parameters
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `max_concurrent_streams` | 128 | Handles sync burst during high gossip activity |
+| `request_timeout` | 30s | Allows slow peers to respond |
+
+**Source:** `network/behaviour.rs:98-105`
+
+---
+
+## 18. Sync Request Rate-Limiting
+
+### 18.1 The Problem
+
+Each gossipped block triggers `maybe_start_sync()`, which checks if synchronization is needed. During high gossip activity, this creates an avalanche of sync requests that overwhelms peers.
+
+### 18.2 Solution
+
+Rate-limit sync requests with two mechanisms:
+
+1. **Time-based throttling:** Minimum 500ms between requests
+2. **Concurrent request limiting:** Maximum 3 pending sync requests
+
+### 18.3 Implementation
+
+```rust
+pub fn maybe_start_sync(&mut self) {
+    if !self.sync_manager.should_sync() {
+        return;
+    }
+
+    // Rate limit: max 1 sync request per 500ms, max 3 pending requests
+    const MIN_SYNC_INTERVAL_MS: u64 = 500;
+    const MAX_PENDING_SYNC_REQUESTS: u32 = 3;
+
+    let elapsed = self.last_sync_request.elapsed();
+    if elapsed.as_millis() < MIN_SYNC_INTERVAL_MS as u128 {
+        return;  // Too soon
+    }
+
+    if self.pending_sync_requests >= MAX_PENDING_SYNC_REQUESTS {
+        return;  // Too many pending
+    }
+
+    if let Some(peer) = self.peer_manager.best_sync_peer() {
+        self.request_sync(&peer.id, from_block, 50);
+        self.last_sync_request = std::time::Instant::now();
+        self.pending_sync_requests += 1;
+    }
+}
+```
+
+### 18.4 Counter Management
+
+| Event | Action |
+|-------|--------|
+| Sync request sent | `pending_sync_requests += 1` |
+| Sync response received | `pending_sync_requests = pending_sync_requests.saturating_sub(1)` |
+| Outbound request failure | `pending_sync_requests = pending_sync_requests.saturating_sub(1)` |
+
+### 18.5 Parameters
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `MIN_SYNC_INTERVAL_MS` | 500 | Prevents request storms |
+| `MAX_PENDING_SYNC_REQUESTS` | 3 | Limits concurrent load on peers |
+| `batch_size` | 50 | Blocks per sync request |
+
+**Source:** `network/service.rs:182-186`, `network/service.rs:446-476`, `network/service.rs:655-670`
+
+---
+
+## 19. Related Specifications
 
 - **SPEC 1:** Tokenomics - Inflation adjustments per state
 - **SPEC 2:** Validator Credits - VC multipliers during bootstrap

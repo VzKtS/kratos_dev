@@ -178,6 +178,12 @@ pub struct NetworkService {
 
     /// Block provider for serving sync requests (optional)
     block_provider: Option<SharedBlockProvider>,
+
+    /// Last sync request time (to prevent request storms)
+    last_sync_request: std::time::Instant,
+
+    /// Number of pending sync requests (to limit concurrent requests)
+    pending_sync_requests: u32,
 }
 
 // =============================================================================
@@ -298,6 +304,8 @@ impl NetworkService {
             local_height: 0,
             local_hash: Hash::ZERO,
             block_provider: None,
+            last_sync_request: std::time::Instant::now(),
+            pending_sync_requests: 0,
         };
 
         // Start listening
@@ -436,8 +444,24 @@ impl NetworkService {
     }
 
     /// Start sync if needed
+    /// Rate-limited to prevent request storms during high gossip activity
     pub fn maybe_start_sync(&mut self) {
         if !self.sync_manager.should_sync() {
+            return;
+        }
+
+        // Rate limit: max 1 sync request per 500ms, max 3 pending requests
+        const MIN_SYNC_INTERVAL_MS: u64 = 500;
+        const MAX_PENDING_SYNC_REQUESTS: u32 = 3;
+
+        let elapsed = self.last_sync_request.elapsed();
+        if elapsed.as_millis() < MIN_SYNC_INTERVAL_MS as u128 {
+            debug!("Sync request rate-limited ({}ms since last)", elapsed.as_millis());
+            return;
+        }
+
+        if self.pending_sync_requests >= MAX_PENDING_SYNC_REQUESTS {
+            debug!("Sync request limited: {} pending requests", self.pending_sync_requests);
             return;
         }
 
@@ -446,6 +470,8 @@ impl NetworkService {
             let peer_id = peer.id;
             let from_block = self.local_height + 1;
             self.request_sync(&peer_id, from_block, 50);
+            self.last_sync_request = std::time::Instant::now();
+            self.pending_sync_requests += 1;
         }
     }
 
@@ -628,6 +654,14 @@ impl NetworkService {
             }
             ReqResEvent::OutboundFailure { peer, request_id, error, .. } => {
                 warn!("Request to {} failed: {:?}", peer, error);
+
+                // Check if this was a sync request and decrement counter
+                if let Some(pending) = self.pending_requests.get(&request_id) {
+                    if matches!(pending.request_type, RequestType::Sync { .. }) {
+                        self.pending_sync_requests = self.pending_sync_requests.saturating_sub(1);
+                    }
+                }
+
                 self.pending_requests.remove(&request_id);
 
                 if let Some(info) = self.peer_manager.get_peer_mut(&peer) {
@@ -806,6 +840,9 @@ impl NetworkService {
             KratosResponse::Sync(sync_res) => {
                 info!("Received {} blocks from {} (has_more: {})",
                     sync_res.blocks.len(), peer, sync_res.has_more);
+
+                // Decrement pending sync counter
+                self.pending_sync_requests = self.pending_sync_requests.saturating_sub(1);
 
                 self.peer_manager.update_peer_height(&peer, sync_res.best_height);
                 self.sync_manager.peer_height_update(sync_res.best_height);

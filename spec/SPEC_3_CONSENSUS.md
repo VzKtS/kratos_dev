@@ -1,12 +1,13 @@
 # SPEC 3: Consensus Mechanism
 
-**Version:** 1.9
+**Version:** 2.0
 **Status:** Normative
-**Last Updated:** 2025-12-21
+**Last Updated:** 2025-12-22
 
 ### Changelog
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.0 | 2025-12-22 | Added §12.5 Sync Rate-Limiting (cross-ref SPEC 6 §18) |
 | 1.9 | 2025-12-21 | Fixed deadlock in import_block() - VC initialization for early validators now uses outer storage lock |
 | 1.8 | 2025-12-21 | Added §18 Genesis State Verification (state root verification + idempotent import) |
 | 1.7 | 2025-12-21 | Fixed joining node VC initialization in apply_received_genesis_state() |
@@ -318,6 +319,18 @@ slot = ((block_timestamp - genesis_timestamp) / SLOT_DURATION) % SLOTS_PER_EPOCH
 ```
 
 This ensures all nodes on the network compute the same expected slot for any given block.
+
+### 12.5 Sync Rate-Limiting
+
+To prevent sync request storms during high gossip activity, synchronization is rate-limited:
+
+| Parameter | Value |
+|-----------|-------|
+| Minimum interval | 500ms between requests |
+| Max pending requests | 3 concurrent |
+| Batch size | 50 blocks |
+
+See **SPEC 6 §18** for full implementation details.
 
 ---
 

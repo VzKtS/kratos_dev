@@ -95,11 +95,13 @@ impl KratOsBehaviour {
             gossipsub.subscribe(&ident_topic)?;
         }
 
-        // Configure request-response
+        // Configure request-response with increased capacity for sync
+        // Default is 10 concurrent inbound streams per peer, which is too low during sync
         let request_response = request_response::Behaviour::new(
             vec![(StreamProtocol::new(KRATOS_PROTOCOL), ProtocolSupport::Full)],
             request_response::Config::default()
-                .with_request_timeout(std::time::Duration::from_secs(30)),
+                .with_request_timeout(std::time::Duration::from_secs(30))
+                .with_max_concurrent_streams(128), // Increased from default 10
         );
 
         // Configure Kademlia
