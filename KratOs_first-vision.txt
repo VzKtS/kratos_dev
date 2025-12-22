@@ -1,7 +1,8 @@
 KratOs — Vision Report --- https://github.com/VzKtS/kratos_dev ---
 INFO "The creator/founder (Vzcrow) will initiate the blockchain genesis with no financial 
 or technical advantages, and will be subject to community votes and consensus mechanisms 
-like all other participant. They may have their validator status (network security) revoked and lose the associated KRAT (native network token) compensation as a result."
+like all other participant. They may have their validator status (network security) revoked and lose 
+the associated KRAT (native network token) compensation as a result."
 
 A Decentralized Infrastructure for Human Coordination
 
