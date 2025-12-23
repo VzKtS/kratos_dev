@@ -31,8 +31,14 @@ async fn main() -> anyhow::Result<()> {
     // Parse CLI arguments
     let cli = Cli::parse();
 
-    // Initialize logging based on verbosity
-    let log_filter = if cli.verbose {
+    // Check if --debug-grandpa is passed (need to peek into Run command)
+    let debug_grandpa = matches!(&cli.command, Commands::Run(cmd) if cmd.debug_grandpa);
+
+    // Initialize logging based on verbosity and debug-grandpa mode
+    let log_filter = if debug_grandpa {
+        // Debug GRANDPA: enable trace logs for finality modules
+        "info,kratos_core::consensus::finality=trace,kratos_core::node::finality_integration=trace"
+    } else if cli.verbose {
         "debug"
     } else {
         &cli.log_level
@@ -51,6 +57,10 @@ async fn main() -> anyhow::Result<()> {
     // Execute command
     match cli.command {
         Commands::Run(cmd) => {
+            if cmd.debug_grandpa {
+                info!("🔧 GRANDPA debug enabled - finality traces at TRACE level");
+            }
+
             // Build node configuration from CLI args
             let config = NodeConfig::from_run_cmd(&cmd).map_err(|e| {
                 error!("Configuration error: {}", e);

@@ -10,16 +10,22 @@ use crate::contracts::{
 };
 use crate::genesis::{ChainConfig, GenesisBuilder, GenesisSpec};
 use crate::network::dns_seeds::{DnsSeedResolver, parse_bootnode};
+use crate::network::dns_seed_client::DnsSeedClient;
 use crate::network::service::{BlockProvider, NetworkEvent, NetworkService, SharedBlockProvider};
 use crate::network::sync::SyncState;
 use crate::node::mempool::TransactionPool;
-use crate::node::producer::{TransactionExecutor, BlockValidator, ValidationError, apply_block_rewards_for_import};
+use crate::node::producer::{TransactionExecutor, BlockValidator, ValidationError, apply_block_rewards_for_import, apply_block_rewards_with_finality};
+use crate::node::finality_integration::{
+    FinalityIntegration, FinalityStatus, NodeFinalitySigner, NodeFinalityBroadcaster,
+};
+use crate::consensus::finality::{FinalityMessage, FinalityVote};
 use crate::storage::{db::Database, state::StateBackend};
 use crate::types::*;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, info, warn, error};
+use tracing::{debug, info, warn, error, trace};
 
 // =============================================================================
 // BLOCK PROVIDER WRAPPER
@@ -119,6 +125,21 @@ pub struct KratOsNode {
     /// SECURITY FIX #36: Clock health tracking for soft degradation
     /// Persisted to file to survive node restarts
     clock_health: Arc<RwLock<LocalClockHealth>>,
+
+    /// GRANDPA-style finality gadget integration
+    /// Coordinates finality voting among validators
+    /// SECURITY: Requires 2/3 supermajority for block finalization
+    /// Wrapped in RwLock to allow initialization after node creation
+    finality: Arc<RwLock<Option<Arc<FinalityIntegration<NodeFinalitySigner, NodeFinalityBroadcaster>>>>>,
+
+    /// Channel receiver for outbound finality messages
+    finality_outbound_rx: Arc<RwLock<Option<mpsc::UnboundedReceiver<FinalityMessage>>>>,
+
+    /// DNS Seed client for sending heartbeats
+    dns_client: Arc<RwLock<Option<DnsSeedClient>>>,
+
+    /// Counter for heartbeat interval (every 4 maintenance cycles = 120s)
+    heartbeat_counter: Arc<RwLock<u32>>,
 }
 
 impl KratOsNode {
@@ -493,6 +514,10 @@ impl KratOsNode {
             shutdown: Arc::new(RwLock::new(false)),
             producer_db: Arc::new(producer_db),
             clock_health: Arc::new(RwLock::new(clock_health)),
+            finality: Arc::new(RwLock::new(None)),
+            finality_outbound_rx: Arc::new(RwLock::new(None)),
+            dns_client: Arc::new(RwLock::new(None)),
+            heartbeat_counter: Arc::new(RwLock::new(0)),
         })
     }
 
@@ -741,6 +766,50 @@ impl KratOsNode {
                     debug!("Genesis matches - peer {} is on same network", peer);
                 }
             }
+
+            NetworkEvent::FinalityVoteReceived { vote_data, from } => {
+                trace!("[GRANDPA] node: FinalityVoteReceived from {}, data_len={}", from, vote_data.len());
+                // Deserialize and process finality vote
+                match bincode::deserialize::<FinalityVote>(&vote_data) {
+                    Ok(vote) => {
+                        trace!(
+                            "[GRANDPA] node: vote deserialized - type={:?}, voter=0x{}..{}, block=#{}",
+                            vote.vote_type,
+                            hex::encode(&vote.voter.as_bytes()[..4]),
+                            hex::encode(&vote.voter.as_bytes()[28..]),
+                            vote.target_number
+                        );
+                        debug!("Processing finality vote from {}", from);
+                        if let Some(voters) = self.process_finality_vote(vote).await {
+                            // Finalization completed - voters list is now available
+                            trace!("[GRANDPA] node: finalization completed with {} voters", voters.len());
+                            info!("🔒 Finalization completed with {} voters", voters.len());
+                        }
+                        // Broadcast any outbound finality messages
+                        trace!("[GRANDPA] node: calling broadcast_finality_messages after vote processing");
+                        self.broadcast_finality_messages().await;
+                    }
+                    Err(e) => {
+                        trace!("[GRANDPA] node: failed to deserialize vote: {:?}", e);
+                        warn!("Failed to deserialize finality vote from {}: {:?}", from, e);
+                    }
+                }
+            }
+
+            NetworkEvent::FinalityJustificationReceived { justification_data, from } => {
+                trace!("[GRANDPA] node: FinalityJustificationReceived from {}, data_len={}", from, justification_data.len());
+                // Deserialize and process finality justification
+                match bincode::deserialize::<FinalityMessage>(&justification_data) {
+                    Ok(message) => {
+                        trace!("[GRANDPA] node: justification deserialized successfully");
+                        debug!("Processing finality justification from {}", from);
+                        self.process_finality_message(message).await;
+                    }
+                    Err(e) => {
+                        warn!("Failed to deserialize finality justification from {}: {:?}", from, e);
+                    }
+                }
+            }
         }
     }
 
@@ -791,6 +860,9 @@ impl KratOsNode {
             )));
         }
 
+        // Track whether validator set changed to update finality gadget
+        let mut finality_validators_changed = false;
+
         // 3. Validate block structure (signature, transactions root, etc.)
         // During initial sync, we may not have the complete validator set yet.
         // If this is block #1 and the validator is unknown, add them dynamically
@@ -808,6 +880,8 @@ impl KratOsNode {
                           block.header.author, block_number);
                     if let Err(e) = validators.ensure_bootstrap_validator(block.header.author, 0) {
                         warn!("Failed to ensure validator from sync: {:?}", e);
+                    } else {
+                        finality_validators_changed = true;
                     }
                 }
             }
@@ -884,6 +958,7 @@ impl KratOsNode {
                                                     "🎉 Early validator {} auto-approved (quorum=1) at block #{}",
                                                     candidate, block_number
                                                 );
+                                                finality_validators_changed = true;
                                                 // Initialize bootstrap VC so the new validator can be selected via VRF
                                                 // Bootstrap validators need BOOTSTRAP_MIN_VC_REQUIREMENT (100 VC)
                                                 // NOTE: We use the already-held `storage` lock from the outer scope
@@ -925,6 +1000,7 @@ impl KratOsNode {
                                                 "🎉 Early validator {} APPROVED and added to validator set at block #{}",
                                                 candidate, block_number
                                             );
+                                            finality_validators_changed = true;
                                             // Initialize bootstrap VC so the new validator can be selected via VRF
                                             // Bootstrap validators need BOOTSTRAP_MIN_VC_REQUIREMENT (100 VC)
                                             // NOTE: We use the already-held `storage` lock from the outer scope
@@ -1003,6 +1079,12 @@ impl KratOsNode {
                 .map_err(|e| NodeError::Storage(format!("Failed to set best block: {:?}", e)))?;
         }
 
+        // Update finality gadget with new validator set if any validators were added
+        if finality_validators_changed {
+            self.update_finality_validators().await;
+            info!("🔐 Finality validator set updated after new validator activation");
+        }
+
         // 5. Remove executed transactions from mempool
         {
             let mut mempool = self.mempool.write().await;
@@ -1028,6 +1110,10 @@ impl KratOsNode {
         } else {
             debug!("📥 Imported block #{} ({})", block_number, block_hash);
         }
+
+        // Notify finality gadget of the new block
+        // This triggers finality voting if we're an active validator
+        self.notify_finality_block_imported(block_number, block_hash).await;
 
         Ok(())
     }
@@ -1091,6 +1177,9 @@ impl KratOsNode {
                                             } else {
                                                 info!("🎯 Initialized 100 VC for new validator {}", candidate);
                                             }
+                                            // Update finality gadget with new validator set
+                                            self.update_finality_validators().await;
+                                            info!("🔐 Finality validator set updated after new validator activation");
                                         }
                                         Err(e) => {
                                             warn!(
@@ -1132,6 +1221,9 @@ impl KratOsNode {
                                         } else {
                                             info!("🎯 Initialized 100 VC for new validator {}", candidate);
                                         }
+                                        // Update finality gadget with new validator set
+                                        self.update_finality_validators().await;
+                                        info!("🔐 Finality validator set updated after new validator activation");
                                     }
                                     Err(e) => {
                                         warn!(
@@ -1187,6 +1279,13 @@ impl KratOsNode {
             info!("⛏️  Produced and stored block #{} ({})", block_number, block_hash);
         }
 
+        // Notify finality gadget of the new block
+        // This triggers finality voting if we're an active validator
+        self.notify_finality_block_imported(block_number, block_hash).await;
+
+        // Broadcast outbound finality messages
+        self.broadcast_finality_messages().await;
+
         Ok(())
     }
 
@@ -1213,6 +1312,10 @@ impl KratOsNode {
             SyncState::Downloading => debug!("Sync: downloading"),
             SyncState::FarBehind => debug!("Sync: far behind, needs warp sync"),
         }
+        drop(network);
+
+        // Send heartbeats to DNS Seeds (every 4 cycles = 120 seconds)
+        self.send_dns_heartbeats().await;
     }
 
     /// Stop the node gracefully
@@ -1622,6 +1725,464 @@ impl KratOsNode {
     pub async fn process_network_event(&self, event: NetworkEvent) {
         self.handle_network_event(event).await;
     }
+
+    // =========================================================================
+    // FINALITY METHODS (GRANDPA-style)
+    // =========================================================================
+
+    /// Get finality information
+    ///
+    /// Returns current finality state including last finalized block
+    pub async fn finality_info(&self) -> FinalityInfo {
+        // For now, use confirmation-based finality (6 blocks)
+        // In a full implementation, this would come from the FinalityGadget
+        let height = self.chain_height().await;
+        let validators_guard = self.validators.read().await;
+        let validator_count = validators_guard.active_count();
+
+        // Calculate finalized block based on confirmation depth
+        // Blocks are considered finalized after 6 confirmations
+        const FINALITY_CONFIRMATIONS: u64 = 6;
+        let finalized_block = height.saturating_sub(FINALITY_CONFIRMATIONS);
+
+        // Get the hash of the finalized block
+        let finalized_hash = {
+            let storage = self.storage.read().await;
+            storage
+                .get_block_by_number(finalized_block)
+                .ok()
+                .flatten()
+                .map(|b| b.hash())
+                .unwrap_or(Hash::ZERO)
+        };
+
+        FinalityInfo {
+            last_finalized_block: finalized_block,
+            last_finalized_hash: finalized_hash,
+            current_round: 0, // Will be updated when FinalityGadget is integrated
+            current_epoch: height / 14400, // Approximate epoch
+            total_validators: validator_count,
+        }
+    }
+
+    /// Get finality justification for a specific block
+    ///
+    /// Returns None if the block is not finalized or justification not available
+    pub async fn get_finality_justification(&self, block_number: BlockNumber) -> Option<FinalityJustification> {
+        // In the current implementation, justifications are stored when blocks are finalized
+        // For now, return None as we don't have full GRANDPA justification storage yet
+        // This will be implemented when FinalityGadget is fully integrated
+
+        let finality_info = self.finality_info().await;
+        if block_number > finality_info.last_finalized_block {
+            return None;
+        }
+
+        // Placeholder: In full implementation, retrieve from storage
+        None
+    }
+
+    /// Get current finality round information
+    ///
+    /// Returns None if no active finality round
+    pub async fn finality_round_info(&self) -> Option<crate::consensus::finality::types::RoundSummary> {
+        let finality_guard = self.finality.read().await;
+        if let Some(ref finality) = *finality_guard {
+            finality.status().await;
+            // Round summary comes from status, but we need to access it differently
+            // For now, return None until we add a proper accessor
+            None
+        } else {
+            None
+        }
+    }
+
+    // =========================================================================
+    // FINALITY INITIALIZATION AND MANAGEMENT
+    // =========================================================================
+
+    /// Initialize the GRANDPA finality gadget
+    ///
+    /// SECURITY: Must be called with the validator's signing key.
+    /// The key is captured in a closure to prevent accidental exposure.
+    ///
+    /// This should be called by the runner when starting a validator node.
+    pub async fn initialize_finality(&self, validator_key: ed25519_dalek::SigningKey) {
+        use crate::types::signature::Signature64;
+
+        // Get validator ID and set up signing closure
+        let validator_id = AccountId::from_bytes(validator_key.verifying_key().to_bytes());
+
+        // Create a signing closure that captures the key
+        // SECURITY: The key is moved into the closure and never exposed
+        let sign_fn = move |message: &[u8]| -> Signature64 {
+            use ed25519_dalek::Signer;
+            let sig = validator_key.sign(message);
+            Signature64(sig.to_bytes())
+        };
+
+        let signer = Arc::new(NodeFinalitySigner::new(validator_id, sign_fn));
+
+        // Create channel for outbound finality messages
+        let (tx, rx) = mpsc::unbounded_channel();
+        let broadcaster = Arc::new(NodeFinalityBroadcaster::new(tx));
+
+        // Get current validators
+        let validators: HashSet<AccountId> = {
+            let validators_guard = self.validators.read().await;
+            validators_guard.active_validators()
+                .iter()
+                .map(|v| v.id)
+                .collect()
+        };
+
+        // Create finality integration
+        let finality = FinalityIntegration::new(
+            signer,
+            broadcaster,
+            validators,
+            self.genesis_hash,
+        );
+
+        *self.finality.write().await = Some(Arc::new(finality));
+        *self.finality_outbound_rx.write().await = Some(rx);
+
+        info!("🔐 Finality gadget initialized for validator 0x{}..{}",
+            hex::encode(&validator_id.as_bytes()[..4]),
+            hex::encode(&validator_id.as_bytes()[28..]));
+
+        // Update validators immediately after initialization
+        // This ensures we have the latest validator set if sync happened before init
+        self.update_finality_validators().await;
+    }
+
+    /// Initialize DNS Seed client for sending heartbeats
+    ///
+    /// This allows the node to register itself with DNS Seeds, making it discoverable
+    /// by other nodes joining the network.
+    ///
+    /// Must be called with a signing key - typically the validator key if validator mode,
+    /// or a network identity key otherwise.
+    pub async fn initialize_dns_client(&self, signing_key: ed25519_dalek::SigningKey) {
+        // Get the libp2p PeerId from the network service
+        let libp2p_peer_id = {
+            let network = self.network.read().await;
+            network.local_peer_id().to_string()
+        };
+
+        let client = DnsSeedClient::new(signing_key, libp2p_peer_id.clone());
+        *self.dns_client.write().await = Some(client);
+        info!("📡 DNS Seed client initialized (PeerId: {}) - heartbeats will be sent every 2 minutes", libp2p_peer_id);
+    }
+
+    /// Send heartbeats to DNS Seeds (called from perform_maintenance)
+    ///
+    /// This should be called periodically (every 2 minutes) to keep the node
+    /// registered with DNS Seeds for peer discovery.
+    pub async fn send_dns_heartbeats(&self) {
+        // Increment counter (maintenance runs every 30s, heartbeat every 120s = 4 cycles)
+        let mut counter = self.heartbeat_counter.write().await;
+        *counter += 1;
+
+        // Send heartbeat every 4 cycles (120 seconds)
+        if *counter < 4 {
+            return;
+        }
+        *counter = 0;
+        drop(counter);
+
+        // Check if DNS client is initialized
+        let mut client_guard = self.dns_client.write().await;
+        let client = match client_guard.as_mut() {
+            Some(c) => c,
+            None => return, // DNS client not initialized
+        };
+
+        // Gather node state for heartbeat
+        let chain_height = *self.chain_height.read().await;
+        let best_hash: [u8; 32] = if let Some(block) = self.current_block.read().await.as_ref() {
+            *block.hash().as_bytes()
+        } else {
+            [0u8; 32]
+        };
+        let genesis_hash: [u8; 32] = *self.genesis_hash.as_bytes();
+
+        // Get validator status
+        // We check if we have an initialized finality gadget as a proxy for being a validator
+        let is_validator = self.finality.read().await.is_some();
+
+        let validator_count = {
+            let validators = self.validators.read().await;
+            Some(validators.active_validators().len() as u32)
+        };
+
+        let total_stake = {
+            let staking = self.staking.read().await;
+            Some(staking.total_stake())
+        };
+
+        // Get local addresses from network
+        let addresses = {
+            let network = self.network.read().await;
+            network.local_listen_addresses()
+                .into_iter()
+                .map(|a| a.to_string())
+                .collect()
+        };
+
+        // Send heartbeats
+        let results = client.send_heartbeats(
+            addresses,
+            chain_height,
+            best_hash,
+            genesis_hash,
+            is_validator,
+            validator_count,
+            total_stake,
+        ).await;
+
+        // Log results
+        let success_count = results.iter().filter(|r| r.success).count();
+        if success_count > 0 {
+            debug!("💓 Sent heartbeats to {}/{} DNS Seeds", success_count, results.len());
+        } else {
+            warn!("💔 Failed to send heartbeats to any DNS Seed");
+            for result in &results {
+                if let Some(ref err) = result.error {
+                    debug!("  DNS Seed {} error: {}", result.seed_ip, err);
+                }
+            }
+        }
+    }
+
+    /// Notify finality gadget of a newly imported block
+    ///
+    /// This triggers finality voting for the block
+    pub async fn notify_finality_block_imported(&self, block_number: BlockNumber, block_hash: Hash) {
+        let finality_guard = self.finality.read().await;
+        if let Some(ref finality) = *finality_guard {
+            finality.on_block_imported(block_number, block_hash).await;
+        }
+    }
+
+    /// Process incoming finality vote from network
+    ///
+    /// Returns the list of voters if the vote completed finalization
+    pub async fn process_finality_vote(&self, vote: FinalityVote) -> Option<Vec<AccountId>> {
+        let finality_guard = self.finality.read().await;
+        if let Some(ref finality) = *finality_guard {
+            finality.on_finality_vote(vote).await
+        } else {
+            None
+        }
+    }
+
+    /// Process incoming finality message from network
+    pub async fn process_finality_message(&self, message: FinalityMessage) -> Option<Vec<AccountId>> {
+        let finality_guard = self.finality.read().await;
+        if let Some(ref finality) = *finality_guard {
+            finality.on_finality_message(message).await
+        } else {
+            None
+        }
+    }
+
+    /// Tick the finality gadget (call periodically for timeout handling)
+    ///
+    /// Returns true if a round timed out and was advanced
+    pub async fn tick_finality(&self) -> bool {
+        trace!("[GRANDPA] node: tick_finality called");
+        let finality_guard = self.finality.read().await;
+        if let Some(ref finality) = *finality_guard {
+            let result = finality.tick().await;
+            if result {
+                trace!("[GRANDPA] node: tick_finality - round timed out");
+            }
+            result
+        } else {
+            trace!("[GRANDPA] node: tick_finality - no finality gadget initialized");
+            false
+        }
+    }
+
+    /// Get the voters from the last finalization
+    ///
+    /// Used for distributing finality rewards (10% of fees)
+    pub async fn get_last_finality_voters(&self) -> Vec<AccountId> {
+        let finality_guard = self.finality.read().await;
+        if let Some(ref finality) = *finality_guard {
+            finality.get_last_finality_voters().await
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Drain and broadcast outbound finality messages
+    ///
+    /// Should be called periodically to send pending finality messages
+    pub async fn broadcast_finality_messages(&self) {
+        trace!("[GRANDPA] node: broadcast_finality_messages called");
+
+        // Drain messages from finality integration
+        let messages: Vec<FinalityMessage> = {
+            let finality_guard = self.finality.read().await;
+            if let Some(ref finality) = *finality_guard {
+                finality.drain_outbound().await
+            } else {
+                trace!("[GRANDPA] node: broadcast_finality_messages - no finality gadget");
+                return;
+            }
+        };
+
+        let msg_count = messages.len();
+        if msg_count > 0 {
+            trace!("[GRANDPA] node: broadcast_finality_messages - {} messages from finality integration", msg_count);
+        }
+
+        // Also drain from the channel
+        let mut rx_guard = self.finality_outbound_rx.write().await;
+        let mut channel_count = 0;
+        if let Some(ref mut rx) = *rx_guard {
+            while let Ok(msg) = rx.try_recv() {
+                channel_count += 1;
+                // Broadcast via network
+                self.broadcast_finality_message_internal(msg).await;
+            }
+        }
+        if channel_count > 0 {
+            trace!("[GRANDPA] node: broadcast_finality_messages - {} messages from channel", channel_count);
+        }
+
+        // Broadcast collected messages
+        for msg in messages {
+            self.broadcast_finality_message_internal(msg).await;
+        }
+
+        if msg_count > 0 || channel_count > 0 {
+            trace!("[GRANDPA] node: broadcast_finality_messages - done broadcasting {} total messages", msg_count + channel_count);
+        }
+    }
+
+    /// Internal: Broadcast a finality message via the network
+    async fn broadcast_finality_message_internal(&self, message: FinalityMessage) {
+        use crate::network::protocol::NetworkMessage;
+
+        trace!("[GRANDPA] node: broadcast_finality_message_internal - message type: {:?}", std::mem::discriminant(&message));
+
+        // Serialize the finality message
+        let serialized = match bincode::serialize(&message) {
+            Ok(data) => data,
+            Err(e) => {
+                trace!("[GRANDPA] node: failed to serialize finality message: {:?}", e);
+                warn!("Failed to serialize finality message: {:?}", e);
+                return;
+            }
+        };
+
+        // Create network message based on type
+        let network_msg = match &message {
+            FinalityMessage::Vote(vote) => {
+                trace!(
+                    "[GRANDPA] node: broadcasting vote - type={:?}, voter=0x{}..{}, block=#{}",
+                    vote.vote_type,
+                    hex::encode(&vote.voter.as_bytes()[..4]),
+                    hex::encode(&vote.voter.as_bytes()[28..]),
+                    vote.target_number
+                );
+                // Serialize the vote for network transmission
+                let vote_data = match bincode::serialize(vote) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        warn!("Failed to serialize finality vote: {:?}", e);
+                        return;
+                    }
+                };
+                NetworkMessage::FinalityVote { vote_data }
+            }
+            FinalityMessage::Finalized { block_number, block_hash, epoch, round } => {
+                trace!("[GRANDPA] node: broadcasting finalization for block #{}", block_number);
+                // For finalized announcements, we include it in a justification message
+                info!("📢 Broadcasting finalization for block #{}", block_number);
+                NetworkMessage::FinalityJustification {
+                    justification_data: serialized,
+                }
+            }
+            _ => {
+                trace!("[GRANDPA] node: broadcasting other finality message type");
+                // Other message types use the generic format
+                NetworkMessage::FinalityJustification {
+                    justification_data: serialized,
+                }
+            }
+        };
+
+        // Broadcast via gossipsub
+        let mut network = self.network.write().await;
+        if let Err(e) = network.broadcast_finality(network_msg) {
+            trace!("[GRANDPA] node: failed to broadcast via gossipsub: {:?}", e);
+            debug!("Failed to broadcast finality message: {:?}", e);
+        } else {
+            trace!("[GRANDPA] node: finality message broadcast successful");
+        }
+    }
+
+    /// Update finality validator set (call at epoch boundaries)
+    pub async fn update_finality_validators(&self) {
+        trace!("[GRANDPA] update_finality_validators called");
+        let finality_guard = self.finality.read().await;
+        if let Some(ref finality) = *finality_guard {
+            let validators: HashSet<AccountId> = {
+                let validators_guard = self.validators.read().await;
+                let active = validators_guard.active_validators();
+                trace!("[GRANDPA] update_finality_validators: {} active validators in validator set", active.len());
+                active.iter().map(|v| v.id).collect()
+            };
+            trace!("[GRANDPA] update_finality_validators: passing {} validators to finality gadget", validators.len());
+            finality.update_validators(validators).await;
+            trace!("[GRANDPA] update_finality_validators: finality gadget updated");
+        } else {
+            trace!("[GRANDPA] update_finality_validators: finality gadget not initialized");
+        }
+    }
+
+    /// Check if finality is active
+    pub async fn is_finality_active(&self) -> bool {
+        let finality_guard = self.finality.read().await;
+        if let Some(ref finality) = *finality_guard {
+            finality.is_active().await
+        } else {
+            false
+        }
+    }
+
+    /// Get finality status for RPC
+    pub async fn finality_status(&self) -> Option<FinalityStatus> {
+        let finality_guard = self.finality.read().await;
+        if let Some(ref finality) = *finality_guard {
+            Some(finality.status().await)
+        } else {
+            None
+        }
+    }
+}
+
+/// Information about the finality state
+#[derive(Debug, Clone)]
+pub struct FinalityInfo {
+    /// Last finalized block number
+    pub last_finalized_block: BlockNumber,
+
+    /// Last finalized block hash
+    pub last_finalized_hash: Hash,
+
+    /// Current finality round
+    pub current_round: u32,
+
+    /// Current epoch
+    pub current_epoch: u64,
+
+    /// Total number of active validators
+    pub total_validators: usize,
 }
 
 /// Apply genesis state received from network to local storage

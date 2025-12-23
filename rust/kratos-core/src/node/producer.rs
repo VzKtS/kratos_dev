@@ -11,7 +11,7 @@
 // - Fee distribution: 60% validator, 30% burn, 10% treasury
 // - VC bonus for block producers
 
-use crate::consensus::economics::{FeeDistribution, InflationCalculator, InflationConfig, NetworkMetrics, BootstrapConfig, get_bootstrap_config};
+use crate::consensus::economics::{FeeDistribution, FeeDistributionResult, InflationCalculator, InflationConfig, NetworkMetrics, BootstrapConfig, get_bootstrap_config};
 use crate::consensus::epoch::SLOT_DURATION_SECS;
 use crate::consensus::validator::{ValidatorSet, UNBONDING_PERIOD};
 use crate::consensus::vrf_selection::VRFSelector;
@@ -948,13 +948,14 @@ impl BlockProducer {
 
     /// Distribute fees and rewards according to config
     ///
-    /// Distribution:
-    /// - 60% to block producer (validator_share)
+    /// Distribution (SPEC v3.2):
+    /// - 50% to block producer
+    /// - 10% to finality voters (divided equally)
     /// - 30% burned (removed from circulation)
     /// - 10% to treasury
     ///
-    /// Returns: (validator_amount, burn_amount, treasury_amount)
-    fn distribute_rewards(&self, total_amount: Balance) -> (Balance, Balance, Balance) {
+    /// Returns: FeeDistributionResult
+    fn distribute_rewards(&self, total_amount: Balance) -> FeeDistributionResult {
         self.config.fee_distribution.distribute(total_amount)
     }
 
@@ -978,6 +979,11 @@ impl BlockProducer {
     /// Get finality tracker
     pub fn finality(&self) -> &FinalityTracker {
         &self.finality
+    }
+
+    /// Get last finalized block (convenience method)
+    pub fn last_finalized(&self) -> (BlockNumber, Hash) {
+        self.finality.finalized()
     }
 
     /// Checks if an epoch/slot has already been signed
@@ -1080,10 +1086,16 @@ impl BlockProducer {
             .as_ref()
             .ok_or(ProductionError::NoValidatorKey)?;
 
-        // Select transactions from mempool
+        // Select transactions from mempool with state-aware nonce tracking
+        // FIX: Use select_transactions_with_state to properly handle accounts
+        // that have already executed transactions (nonce > 0)
         let transactions = {
             let mempool_guard = mempool.read().await;
-            mempool_guard.select_transactions(self.config.max_transactions_per_block)
+            let mut state_guard = state.write().await;
+            mempool_guard.select_transactions_with_state(
+                self.config.max_transactions_per_block,
+                &mut state_guard,
+            )
         };
 
         debug!("Selected {} transactions for block", transactions.len());
@@ -1148,33 +1160,37 @@ impl BlockProducer {
             // Collect total fees from executed transactions
             let total_fees: Balance = results.iter().map(|r| r.fee_paid).sum();
 
-            // Distribute fees: 60% validator, 30% burn, 10% treasury
-            let (fee_to_validator, fee_burn, fee_to_treasury) = self.distribute_rewards(total_fees);
+            // SPEC v3.2: Distribute fees (50/10/30/10)
+            let fee_result = self.distribute_rewards(total_fees);
 
-            // Total validator reward = 100% block reward + 60% fees
-            let total_validator_reward = block_reward_with_bonus.saturating_add(fee_to_validator);
+            // Total producer reward = 100% block reward + 50% fees (SPEC v3.2)
+            let total_producer_reward = block_reward_with_bonus.saturating_add(fee_result.producer);
 
-            if total_validator_reward > 0 || fee_to_treasury > 0 {
-                // Pay validator: full block reward + their share of fees
-                let mut validator_account = state_guard
+            // Treasury gets 10% of fees + any finality voter remainder (when no voters)
+            // Note: Finality voter rewards are distributed separately when finality is active
+            let treasury_amount = fee_result.treasury.saturating_add(fee_result.finality_voters);
+
+            if total_producer_reward > 0 || treasury_amount > 0 {
+                // Pay producer: full block reward + 50% of fees
+                let mut producer_account = state_guard
                     .get_account(&validator_id)
-                    .map_err(|e| ProductionError::StateError(format!("Get validator account: {:?}", e)))?
+                    .map_err(|e| ProductionError::StateError(format!("Get producer account: {:?}", e)))?
                     .unwrap_or(AccountInfo::new());
 
-                validator_account.free = validator_account.free.saturating_add(total_validator_reward);
+                producer_account.free = producer_account.free.saturating_add(total_producer_reward);
 
                 state_guard
-                    .set_account(validator_id, validator_account)
-                    .map_err(|e| ProductionError::StateError(format!("Set validator account: {:?}", e)))?;
+                    .set_account(validator_id, producer_account)
+                    .map_err(|e| ProductionError::StateError(format!("Set producer account: {:?}", e)))?;
 
-                // Pay treasury (10% of fees only)
-                if fee_to_treasury > 0 {
+                // Pay treasury (10% of fees + finality share when no voters)
+                if treasury_amount > 0 {
                     let mut treasury_account = state_guard
                         .get_account(&self.config.treasury_account)
                         .map_err(|e| ProductionError::StateError(format!("Get treasury account: {:?}", e)))?
                         .unwrap_or(AccountInfo::new());
 
-                    treasury_account.free = treasury_account.free.saturating_add(fee_to_treasury);
+                    treasury_account.free = treasury_account.free.saturating_add(treasury_amount);
 
                     state_guard
                         .set_account(self.config.treasury_account, treasury_account)
@@ -1185,16 +1201,16 @@ impl BlockProducer {
                 // Creates deflationary pressure when network is actively used
 
                 // Log reward with validator address for debugging
-                let reward_krat = total_validator_reward / KRAT;
-                let reward_frac = (total_validator_reward % KRAT) / 1_000_000_000; // 3 decimals
+                let reward_krat = total_producer_reward / KRAT;
+                let reward_frac = (total_producer_reward % KRAT) / 1_000_000_000; // 3 decimals
                 info!(
                     "💰 Reward: +{}.{:03} KRAT → 0x{}",
                     reward_krat, reward_frac, hex::encode(validator_id.as_bytes())
                 );
 
                 debug!(
-                    "Rewards distributed: block_reward={} (VC bonus from {} VC), fee_validator={}, fee_burn={}, fee_treasury={}",
-                    block_reward_with_bonus, validator_vc, fee_to_validator, fee_burn, fee_to_treasury
+                    "Rewards distributed: block_reward={} (VC bonus from {} VC), fee_producer={}, fee_finality={}, fee_burn={}, fee_treasury={}",
+                    block_reward_with_bonus, validator_vc, fee_result.producer, fee_result.finality_voters, fee_result.burn, fee_result.treasury
                 );
             }
 
@@ -1281,12 +1297,12 @@ impl BlockProducer {
         };
         let block_reward = self.apply_vc_bonus(base_block_reward, validator_vc);
 
-        let (fee_to_validator, _, _) = self.distribute_rewards(total_fees);
-        let total_validator_reward = block_reward.saturating_add(fee_to_validator);
+        let fee_result = self.distribute_rewards(total_fees);
+        let total_producer_reward = block_reward.saturating_add(fee_result.producer);
 
-        // Format validator reward in KRAT (divide by 10^12)
-        let reward_krat = total_validator_reward / 1_000_000_000_000;
-        let reward_remainder = (total_validator_reward % 1_000_000_000_000) / 1_000_000_000; // 3 decimal places
+        // Format producer reward in KRAT (divide by 10^12)
+        let reward_krat = total_producer_reward / 1_000_000_000_000;
+        let reward_remainder = (total_producer_reward % 1_000_000_000_000) / 1_000_000_000; // 3 decimal places
 
         if tx_count > 0 {
             let fees_krat = total_fees / 1_000_000_000_000;
@@ -1433,13 +1449,35 @@ impl BlockProducer {
 /// - author: block producer account
 /// - epoch: block epoch (for bootstrap/post-bootstrap inflation rate)
 /// - total_fees: sum of fees from all transactions in block
+/// - finality_voters: list of validators who participated in finality (optional)
 ///
-/// Returns: total reward credited to validator (block reward + fees share)
+/// Returns: total reward credited to producer (block reward + producer fees share)
+///
+/// SPEC v3.2: Fee distribution
+/// - Producer: 50% of fees
+/// - Finality voters: 10% of fees (divided equally)
+/// - Burn: 30% of fees
+/// - Treasury: 10% of fees
 pub fn apply_block_rewards_for_import(
     state: &mut StateBackend,
     author: AccountId,
     epoch: EpochNumber,
     total_fees: Balance,
+) -> Result<Balance, String> {
+    // Call the extended version with no finality voters
+    // This maintains backwards compatibility
+    apply_block_rewards_with_finality(state, author, epoch, total_fees, &[])
+}
+
+/// Apply block rewards with finality voter rewards
+///
+/// SPEC v3.2: Extended version that distributes fees to finality voters
+pub fn apply_block_rewards_with_finality(
+    state: &mut StateBackend,
+    author: AccountId,
+    epoch: EpochNumber,
+    total_fees: Balance,
+    finality_voters: &[AccountId],
 ) -> Result<Balance, String> {
     // Get bootstrap config to check if we're in bootstrap era
     let bootstrap_config = get_bootstrap_config();
@@ -1481,51 +1519,145 @@ pub fn apply_block_rewards_for_import(
         block_reward
     };
 
-    // Distribute fees: 60% validator, 30% burn, 10% treasury
+    // SPEC v3.2: Distribute fees (50/10/30/10)
     let fee_distribution = FeeDistribution::default_distribution();
-    let (fee_to_validator, _fee_burn, fee_to_treasury) = fee_distribution.distribute(total_fees);
+    let fee_result = fee_distribution.distribute(total_fees);
 
-    // Total validator reward = 100% block reward + 60% fees
-    let total_validator_reward = block_reward_with_bonus.saturating_add(fee_to_validator);
+    // Total producer reward = 100% block reward + 50% fees (SPEC v3.2)
+    let total_producer_reward = block_reward_with_bonus.saturating_add(fee_result.producer);
 
-    // Credit validator
-    if total_validator_reward > 0 {
-        let mut validator_account = state
+    // Credit block producer
+    if total_producer_reward > 0 {
+        let mut producer_account = state
             .get_account(&author)
-            .map_err(|e| format!("Get validator account: {:?}", e))?
+            .map_err(|e| format!("Get producer account: {:?}", e))?
             .unwrap_or(AccountInfo::new());
 
-        validator_account.free = validator_account.free.saturating_add(total_validator_reward);
+        producer_account.free = producer_account.free.saturating_add(total_producer_reward);
 
         state
-            .set_account(author, validator_account)
-            .map_err(|e| format!("Set validator account: {:?}", e))?;
+            .set_account(author, producer_account)
+            .map_err(|e| format!("Set producer account: {:?}", e))?;
     }
 
-    // Credit treasury (10% of fees only)
-    if fee_to_treasury > 0 {
+    // SPEC v3.2: Credit finality voters (10% of fees divided equally)
+    let num_voters = finality_voters.len();
+    if num_voters > 0 && fee_result.finality_voters > 0 {
+        let per_voter_share = fee_result.per_voter_share(num_voters);
+        let remainder = fee_result.voter_remainder(num_voters);
+
+        // Log finality voter distribution header
+        let total_finality_krat = fee_result.finality_voters / KRAT;
+        let total_finality_frac = (fee_result.finality_voters % KRAT) / 1_000_000_000;
+        let share_krat = per_voter_share / KRAT;
+        let share_frac = (per_voter_share % KRAT) / 1_000_000_000;
+
+        info!(
+            "🗳️  FINALITY REWARDS: Distributing {}.{:03} KRAT among {} voters ({}.{:03} KRAT each)",
+            total_finality_krat, total_finality_frac, num_voters, share_krat, share_frac
+        );
+
+        for voter in finality_voters {
+            // Skip if voter is the producer (they already got their share)
+            if *voter == author {
+                info!(
+                    "   └─ 0x{}..{} (producer): skipped (already received producer share)",
+                    hex::encode(&voter.as_bytes()[..4]),
+                    hex::encode(&voter.as_bytes()[28..])
+                );
+                continue;
+            }
+
+            let mut voter_account = state
+                .get_account(voter)
+                .map_err(|e| format!("Get voter account: {:?}", e))?
+                .unwrap_or(AccountInfo::new());
+
+            voter_account.free = voter_account.free.saturating_add(per_voter_share);
+
+            state
+                .set_account(*voter, voter_account)
+                .map_err(|e| format!("Set voter account: {:?}", e))?;
+
+            info!(
+                "   └─ 💰 0x{}..{}: +{}.{:03} KRAT (finality reward)",
+                hex::encode(&voter.as_bytes()[..4]),
+                hex::encode(&voter.as_bytes()[28..]),
+                share_krat, share_frac
+            );
+        }
+
+        // Add remainder to treasury
+        if remainder > 0 {
+            let treasury_account_id = AccountId::from_bytes(TREASURY_ACCOUNT);
+            let mut treasury_account = state
+                .get_account(&treasury_account_id)
+                .map_err(|e| format!("Get treasury account: {:?}", e))?
+                .unwrap_or(AccountInfo::new());
+
+            treasury_account.free = treasury_account
+                .free
+                .saturating_add(fee_result.treasury)
+                .saturating_add(remainder);
+
+            state
+                .set_account(treasury_account_id, treasury_account)
+                .map_err(|e| format!("Set treasury account: {:?}", e))?;
+        }
+    } else {
+        // No finality voters: finality share goes to treasury
+        let treasury_amount = fee_result.treasury.saturating_add(fee_result.finality_voters);
+
+        if treasury_amount > 0 {
+            let treasury_account_id = AccountId::from_bytes(TREASURY_ACCOUNT);
+            let mut treasury_account = state
+                .get_account(&treasury_account_id)
+                .map_err(|e| format!("Get treasury account: {:?}", e))?
+                .unwrap_or(AccountInfo::new());
+
+            treasury_account.free = treasury_account.free.saturating_add(treasury_amount);
+
+            state
+                .set_account(treasury_account_id, treasury_account)
+                .map_err(|e| format!("Set treasury account: {:?}", e))?;
+        }
+    }
+
+    // Credit treasury (10% of fees) if not already done
+    if num_voters > 0 && fee_result.treasury > 0 {
         let treasury_account_id = AccountId::from_bytes(TREASURY_ACCOUNT);
         let mut treasury_account = state
             .get_account(&treasury_account_id)
             .map_err(|e| format!("Get treasury account: {:?}", e))?
             .unwrap_or(AccountInfo::new());
 
-        treasury_account.free = treasury_account.free.saturating_add(fee_to_treasury);
+        treasury_account.free = treasury_account.free.saturating_add(fee_result.treasury);
 
         state
             .set_account(treasury_account_id, treasury_account)
             .map_err(|e| format!("Set treasury account: {:?}", e))?;
     }
 
-    // Log reward reconstruction (not new rewards, just rebuilding state to match producer)
-    let reward_krat = total_validator_reward / KRAT;
-    let reward_frac = (total_validator_reward % KRAT) / 1_000_000_000; // 3 decimals
-    debug!(
-        "📥 State rebuild: credited +{}.{:03} KRAT to author 0x{} (matching producer's state)",
-        reward_krat, reward_frac, hex::encode(author.as_bytes())
-    );
+    // Log complete reward distribution summary
+    let reward_krat = total_producer_reward / KRAT;
+    let reward_frac = (total_producer_reward % KRAT) / 1_000_000_000;
+    let burn_krat = fee_result.burn / KRAT;
+    let burn_frac = (fee_result.burn % KRAT) / 1_000_000_000;
+    let treasury_krat = fee_result.treasury / KRAT;
+    let treasury_frac = (fee_result.treasury % KRAT) / 1_000_000_000;
 
-    Ok(total_validator_reward)
+    if total_fees > 0 {
+        info!(
+            "📊 FEE DISTRIBUTION (50/10/30/10): producer={}.{:03}, voters={}, burn={}.{:03}, treasury={}.{:03} KRAT",
+            reward_krat - (block_reward_with_bonus / KRAT),
+            reward_frac,
+            num_voters,
+            burn_krat, burn_frac,
+            treasury_krat, treasury_frac
+        );
+    }
+
+    Ok(total_producer_reward)
 }
 
 // =============================================================================

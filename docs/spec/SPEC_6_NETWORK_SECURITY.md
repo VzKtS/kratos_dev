@@ -1,12 +1,13 @@
 # SPEC 6: Network Security States
 
-**Version:** 1.3
+**Version:** 1.4
 **Status:** Normative
-**Last Updated:** 2025-12-22
+**Last Updated:** 2025-12-23
 
 ### Changelog
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.4 | 2025-12-23 | Added §20 DNS Seed Service (kratos-dns-seed) - heartbeat protocol, IDpeers.json, network state awareness |
 | 1.3 | 2025-12-22 | Added §17 libp2p Capacity, §18 Sync Rate-Limiting |
 | 1.2 | 2025-12-21 | Added §16 RPC Channel Architecture |
 | 1.1 | 2025-12-21 | Added §12-15 (DNS Seeds, Identity, Sync, Genesis) |
@@ -737,7 +738,304 @@ pub fn maybe_start_sync(&mut self) {
 
 ---
 
-## 19. Related Specifications
+## 20. DNS Seed Service (kratos-dns-seed)
+
+### 20.1 Overview
+
+The **kratos-dns-seed** is an independent application that provides reliable peer discovery for the KratOs network. Unlike traditional DNS seeds that require active crawling, this service uses a **heartbeat protocol** where nodes proactively announce themselves.
+
+**Key Features:**
+- **Heartbeat-based:** Nodes send signed heartbeats every 2 minutes
+- **Cryptographic verification:** Ed25519 signatures with domain separation
+- **Network state awareness:** Broadcasts current security state to nodes
+- **Signed peer lists:** Generates cryptographically signed `IDpeers.json`
+- **Independent deployment:** Runs separately from validator nodes
+
+### 20.2 Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     kratos-dns-seed                              │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────────┐   ┌──────────────────┐                    │
+│  │ HeartbeatReceiver│   │ NetworkState     │                    │
+│  │ (TCP:30334)      │   │ Aggregator       │                    │
+│  └────────┬─────────┘   └────────┬─────────┘                    │
+│           │                      │                               │
+│           ▼                      ▼                               │
+│  ┌─────────────────────────────────────────┐                    │
+│  │           PeerRegistry (RocksDB)         │                    │
+│  │  - Peer scores (0-1000)                  │                    │
+│  │  - Last seen timestamps                  │                    │
+│  │  - Network capabilities                  │                    │
+│  └─────────────────────────────────────────┘                    │
+│           │                                                      │
+│           ▼                                                      │
+│  ┌──────────────────┐   ┌──────────────────┐                    │
+│  │  DNS Server      │   │  HTTP API        │                    │
+│  │  (UDP:53)        │   │  (:8080)         │                    │
+│  └──────────────────┘   └──────────────────┘                    │
+│           │                      │                               │
+│           ▼                      ▼                               │
+│  ┌─────────────────────────────────────────┐                    │
+│  │      IDpeers.json Distribution           │                    │
+│  │  (Signed, versioned peer list)           │                    │
+│  └─────────────────────────────────────────┘                    │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 20.3 Heartbeat Protocol
+
+#### 20.3.1 Message Format
+
+```rust
+pub struct HeartbeatMessage {
+    pub version: u32,              // Protocol version (currently 1)
+    pub peer_id: [u8; 32],         // Ed25519 public key (for signature verification)
+    pub libp2p_peer_id: String,    // libp2p PeerId base58 (for peer discovery, e.g., "12D3KooW...")
+    pub addresses: Vec<String>,    // Multiaddr list (e.g., ["/ip4/1.2.3.4/tcp/30333"])
+    pub current_height: u64,       // Current block height
+    pub best_hash: [u8; 32],       // Best block hash
+    pub genesis_hash: [u8; 32],    // Genesis hash (for chain validation)
+    pub is_validator: bool,        // Is active validator
+    pub validator_count: Option<u32>,  // Known validator count
+    pub total_stake: Option<u128>, // Total stake (if validator)
+    pub protocol_version: u32,     // Node protocol version
+    pub timestamp: u64,            // Unix timestamp
+    pub signature: [u8; 64],       // Ed25519 signature
+}
+```
+
+**Field Clarification:**
+- `peer_id`: The 32-byte Ed25519 public key used for **signature verification**
+- `libp2p_peer_id`: The base58-encoded libp2p PeerId (e.g., `12D3KooWSpAybJ2D9DAt74StZYE4NA7Dbx9W9DxgyANyjT6g6GPn`) used for **peer connection**
+
+#### 20.3.2 Signature Domain Separation
+
+To prevent signature reuse attacks, heartbeats use domain separation:
+
+```rust
+const HEARTBEAT_DOMAIN: &[u8] = b"KRATOS_HEARTBEAT_V1";
+
+fn sign_heartbeat(message: &HeartbeatMessage, keypair: &Keypair) -> [u8; 64] {
+    let payload = serialize_for_signing(message);
+    let domain_payload = [HEARTBEAT_DOMAIN, &payload].concat();
+    keypair.sign(&domain_payload)
+}
+```
+
+#### 20.3.3 Protocol Flow
+
+```
+Node                                DNS Seed
+  │                                     │
+  │─────── TCP Connect :30334 ─────────►│
+  │                                     │
+  │─────── HeartbeatMessage ───────────►│
+  │        (signed, serialized)         │
+  │                                     │
+  │                                     │ Verify signature
+  │                                     │ Update registry
+  │                                     │ Update score
+  │                                     │
+  │◄────── NetworkStateInfo ────────────│
+  │        (current security state)     │
+  │                                     │
+  └─────────────────────────────────────┘
+```
+
+### 20.4 Peer Registry
+
+#### 20.4.1 Scoring System
+
+| Score Range | Status | Selection Probability |
+|-------------|--------|----------------------|
+| 800-1000 | Excellent | High priority |
+| 500-799 | Good | Normal selection |
+| 200-499 | Marginal | Low priority |
+| 0-199 | Poor | Excluded from lists |
+
+#### 20.4.2 Score Adjustments
+
+| Event | Score Change |
+|-------|-------------|
+| Valid heartbeat | +10 |
+| Consistent uptime | +5 per hour |
+| Validator status | +50 bonus |
+| Missed heartbeat | -20 |
+| Invalid signature | -100 |
+| Stale timestamp | -50 |
+
+#### 20.4.3 Persistence
+
+```rust
+// RocksDB column families
+const CF_PEERS: &str = "peers";           // PeerId → PeerRecord
+const CF_SCORES: &str = "scores";         // PeerId → Score
+const CF_TIMESTAMPS: &str = "timestamps"; // PeerId → LastSeen
+```
+
+### 20.5 Network State Awareness
+
+The DNS Seed aggregates network state from connected nodes and broadcasts the current security state:
+
+```rust
+pub struct NetworkStateInfo {
+    pub state: String,           // "Bootstrap", "Normal", "Degraded", etc.
+    pub validator_count: u32,    // Active validators
+    pub current_epoch: u64,      // Network epoch
+    pub latest_block: u64,       // Highest known block
+    pub timestamp: i64,          // State timestamp
+    pub state_hash: [u8; 32],    // Hash for verification
+    pub signature: [u8; 64],     // DNS Seed signature
+}
+```
+
+### 20.6 IDpeers.json Format
+
+The DNS Seed generates a signed JSON file containing active peers:
+
+```json
+{
+  "version": 1,
+  "generated_at": "2025-12-23T10:00:00Z",
+  "ttl_seconds": 300,
+  "network_state": "Normal",
+  "peers": [
+    {
+      "peer_id": "a1b2c3d4...(64 hex chars)",
+      "libp2p_peer_id": "12D3KooWSpAybJ2D9DAt74StZYE4NA7Dbx9W9DxgyANyjT6g6GPn",
+      "addresses": ["/ip4/45.8.132.252/tcp/30333"],
+      "score": 950,
+      "is_validator": true,
+      "current_height": 12345,
+      "last_seen": 1703329200
+    }
+  ],
+  "signature": "hex-encoded-ed25519-signature",
+  "dns_seed_id": "hex-encoded-public-key"
+}
+```
+
+**Peer Fields:**
+- `peer_id`: 32-byte Ed25519 public key (hex-encoded, for signature verification)
+- `libp2p_peer_id`: Base58-encoded libp2p PeerId (for connecting via multiaddr)
+- `addresses`: List of multiaddrs where the peer is reachable
+
+### 20.7 HTTP API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/peers` | GET | Returns signed IDpeers.json |
+| `/peers/count` | GET | Number of active peers |
+| `/state` | GET | Current network state |
+| `/metrics` | GET | Prometheus metrics |
+| `/health` | GET | Health check |
+
+### 20.8 DNS Resolution
+
+The DNS Seed responds to DNS queries with active peer IPs:
+
+| Query Type | Response |
+|------------|----------|
+| A record | IPv4 addresses of top peers |
+| TXT record | Network state summary |
+| SRV record | Peer IPs with ports |
+
+### 20.9 Client Integration
+
+KratOs nodes use the DNS Seed client to fetch peer lists:
+
+```rust
+// In kratos-core/src/network/dns_seed_client.rs
+
+pub async fn fetch_peers_from_dns_seed(seed_url: &str) -> Result<Vec<PeerInfo>> {
+    let client = reqwest::Client::new();
+    let response = client.get(format!("{}/peers", seed_url))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+
+    let id_peers: IdPeersFile = response.json().await?;
+
+    // Verify signature before trusting peer list
+    verify_idpeers_signature(&id_peers)?;
+
+    Ok(id_peers.peers)
+}
+```
+
+### 20.10 Security Considerations
+
+| Threat | Mitigation |
+|--------|------------|
+| Sybil attack | Score-based selection prioritizes established peers |
+| Replay attack | Timestamp validation (max 5 minutes drift) |
+| Signature forgery | Ed25519 verification with domain separation |
+| Eclipse attack | Multiple independent DNS Seeds required |
+| Data poisoning | IDpeers.json is cryptographically signed |
+
+### 20.11 Operator Requirements
+
+| Requirement | Value |
+|-------------|-------|
+| Uptime SLA | 99.9% |
+| Storage | >= 10 GB (RocksDB) |
+| Network | Static IP, ports 53/30334/8080 |
+| Heartbeat capacity | >= 1000 nodes |
+| Geographic diversity | Recommended different region |
+
+### 20.12 Configuration
+
+```toml
+# kratos-dns-seed.toml
+
+[server]
+heartbeat_port = 30334
+dns_port = 53
+http_port = 8080
+data_dir = "/var/lib/kratos-dns-seed"
+
+[registry]
+heartbeat_interval_secs = 120
+max_peer_age_secs = 600
+min_score_for_listing = 200
+max_peers_in_response = 50
+
+[crypto]
+keypair_path = "/etc/kratos-dns-seed/keypair"
+
+[network]
+expected_network_id = "kratos-mainnet"
+```
+
+### 20.13 Official DNS Seeds
+
+| Seed | IP Address | Operator | Region |
+|------|------------|----------|--------|
+| seed1 | 5.189.184.205 | KratOs Dev | EU |
+| seed2 | 45.8.132.252 | KratOs Dev | EU |
+| seed3 | 74.208.14.99 | KratOs Dev | US |
+
+### 20.14 Implementation Files
+
+| File | Contents |
+|------|----------|
+| `kratos-dns-seed/src/main.rs` | Application entry point |
+| `kratos-dns-seed/src/heartbeat/` | Heartbeat receiver and protocol |
+| `kratos-dns-seed/src/registry/` | Peer registry and scoring |
+| `kratos-dns-seed/src/network_state/` | Network state aggregator |
+| `kratos-dns-seed/src/api/` | HTTP API and metrics |
+| `kratos-dns-seed/src/dns/` | DNS server implementation |
+| `kratos-dns-seed/src/distribution/` | IDpeers.json generation |
+| `kratos-core/src/network/dns_seed_client.rs` | Client-side integration |
+| `kratos-core/src/network/dns_seeds.rs` | DNS seed registry |
+
+---
+
+## 21. Related Specifications
 
 - **SPEC 1:** Tokenomics - Inflation adjustments per state
 - **SPEC 2:** Validator Credits - VC multipliers during bootstrap

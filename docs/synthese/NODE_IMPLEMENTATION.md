@@ -314,6 +314,170 @@ Block validation checks:
 - Transactions valid
 - Block size limits
 
+### GRANDPA Finality
+
+**Location**: `src/consensus/finality/`
+
+KratOs uses a GRANDPA-style Byzantine Fault Tolerant finality gadget:
+
+```rust
+/// Finality round state machine
+pub enum RoundState {
+    Prevoting,      // Collecting prevotes
+    Precommitting,  // 2/3 prevotes reached, collecting precommits
+    Completed,      // 2/3 precommits reached, block finalized
+    Failed,         // Round timed out
+}
+
+/// Finality vote structure
+pub struct FinalityVote {
+    pub vote_type: VoteType,  // Prevote or Precommit
+    pub target_number: BlockNumber,
+    pub target_hash: Hash,
+    pub round: u32,
+    pub epoch: EpochNumber,
+    pub voter: AccountId,
+    pub signature: Signature64,
+}
+```
+
+**Key Components:**
+
+| File | Purpose |
+|------|---------|
+| `finality/mod.rs` | Module structure, supermajority helpers |
+| `finality/types.rs` | FinalityVote, VoteType, EquivocationProof |
+| `finality/votes.rs` | VoteCollector with equivocation detection |
+| `finality/rounds.rs` | FinalityRound, RoundManager |
+| `finality/gadget.rs` | FinalityGadget coordinator |
+
+**Protocol Flow:**
+```
+Prevoting Phase          Precommitting Phase          Finalized
+     │                          │                          │
+     ▼                          ▼                          ▼
+ Validators vote    →    Commit with 2/3    →    Block is
+ on best chain           prevote target          finalized
+     │                          │                          │
+     └── 2/3 prevotes ──────────┘── 2/3 precommits ────────┘
+```
+
+**Supermajority Threshold:**
+```rust
+pub fn has_supermajority(count: usize, total: usize) -> bool {
+    count * 100 >= total * 66  // 2/3 = 66%
+}
+```
+
+**Configuration:**
+
+| Parameter | Value |
+|-----------|-------|
+| Round timeout | 6 seconds |
+| Minimum validators | 3 |
+| Threshold | 66% (2/3) |
+| Domain separation | `KRATOS_FINALITY_V1:` |
+
+**See Also:** [grandpa-finality.svg](../diagrams/grandpa-finality.svg)
+
+### Node-Level Finality Integration
+
+**Location**: `src/node/finality_integration.rs`
+
+The finality gadget is coordinated with the node via `FinalityIntegration`:
+
+```rust
+/// Coordinates finality gadget with node operations
+pub struct FinalityIntegration<S: FinalitySigner, B: FinalityBroadcaster> {
+    /// The finality gadget
+    gadget: RwLock<FinalityGadget<S, B>>,
+
+    /// Voters from last finalization (for reward distribution)
+    last_finality_voters: RwLock<Vec<AccountId>>,
+
+    /// Last finalized block number
+    last_finalized: RwLock<BlockNumber>,
+
+    /// Whether finality is active (requires MIN_VALIDATORS_FOR_FINALITY)
+    is_active: RwLock<bool>,
+}
+```
+
+**Key Components:**
+
+| Component | File | Purpose |
+|-----------|------|---------|
+| `NodeFinalitySigner` | `finality_integration.rs` | Signs votes with validator key (closure pattern for security) |
+| `NodeFinalityBroadcaster` | `finality_integration.rs` | Broadcasts votes via unbounded channel to network |
+| `FinalityIntegration` | `finality_integration.rs` | Coordinates gadget lifecycle with node |
+
+**Initialization Flow:**
+
+```
+Node Startup
+     │
+     ▼
+initialize_finality(validator_key)
+     │
+     ├─ Create NodeFinalitySigner with signing closure
+     ├─ Create NodeFinalityBroadcaster with channel
+     ├─ Build validator set from current validators
+     ├─ Create FinalityIntegration
+     │
+     ▼
+Finality Active (if >= 3 validators)
+```
+
+**Event Loop Integration:**
+
+```rust
+// In runner.rs main loop
+loop {
+    tokio::select! {
+        // ... other events ...
+
+        // Finality tick (every SLOT_DURATION_SECS)
+        _ = finality_tick_interval.tick() => {
+            if config.validator && validator_key.is_some() {
+                node.tick_finality().await;           // Handle timeouts
+                node.broadcast_finality_messages().await;  // Send queued votes
+            }
+        }
+    }
+}
+```
+
+**Network Message Handling:**
+
+```rust
+// In service.rs - handle_network_event()
+NetworkEvent::FinalityVoteReceived(vote) => {
+    if let Some(voters) = self.process_finality_vote(vote).await {
+        // Voters list available for reward distribution
+        info!("Block finalized with {} voters", voters.len());
+    }
+}
+```
+
+**Fee Distribution Integration:**
+
+When a block is finalized, the precommit voters receive 10% of fees:
+
+```
+Block Finalized
+     │
+     ▼
+get_last_finality_voters() → Vec<AccountId>
+     │
+     ▼
+distribute_fees(total_fees, producer, finality_voters)
+     │
+     ├─ 50% → Block Producer
+     ├─ 10% → Finality Voters (shared equally)
+     ├─ 30% → Burn
+     └─ 10% → Treasury
+```
+
 ---
 
 ## Network Layer
@@ -352,69 +516,167 @@ pub struct KratosBehaviour {
 - `/kratos/blocks/1.0.0` - New block announcements
 - `/kratos/transactions/1.0.0` - Transaction propagation
 - `/kratos/sync/1.0.0` - Chain synchronization
+- `/kratos/consensus/1.0.0` - Consensus messages
+- `/kratos/finality/1.0.0` - Finality votes and justifications
 
 ### Default Ports
 
 | Port | Service |
 |------|---------|
-| 30333 | P2P networking |
+| 30333 | P2P networking (libp2p) |
+| 30334 | DNS Seed heartbeat (TCP) |
+| 8080 | DNS Seed HTTP API |
 | 9933 | JSON-RPC HTTP (default) |
 
 ### Peer Discovery - DNS Seeds
 
-**Location**: `src/network/dns_seeds.rs`
+**Location**: `src/network/dns_seeds.rs`, `src/network/dns_seed_client.rs`
 
 KratOs implements decentralized peer discovery via DNS Seeds. When a node starts, it automatically queries DNS seeds to find active peers without manual configuration.
 
 **Discovery Order:**
 ```
-1. DNS Seeds + Fallback Bootnodes → Always resolved together
-2. CLI Bootnodes                  → Use --bootnode /ip4/.../p2p/...
-3. Kademlia DHT                   → Learn peers from connected nodes
+1. DNS Seeds (IDpeers.json)       → Fetch signed peer lists via HTTP
+2. Fallback Bootnodes             → Hardcoded peers always included
+3. CLI Bootnodes                  → Use --bootnode /ip4/.../p2p/...
+4. Kademlia DHT                   → Learn peers from connected nodes
 ```
 
-**DNS Seed Resolution:**
+**Official DNS Seeds:**
+
+| Seed | IP Address | Region |
+|------|------------|--------|
+| seed1 | 5.189.184.205 | EU |
+| seed2 | 45.8.132.252 | EU |
+| seed3 | 74.208.14.99 | US |
+
+**DNS Seed Client:**
+
 ```rust
-pub struct DnsSeedResolver {
-    seeds: Vec<String>,           // DNS hostnames
-    fallback_bootnodes: Vec<String>,  // Hardcoded fallbacks
-    timeout: Duration,            // 10 seconds
-}
+// In network/dns_seed_client.rs
 
-impl DnsSeedResolver {
-    /// Resolve all DNS seeds and always include fallback bootnodes
-    pub fn resolve(&mut self) -> DnsResolutionResult {
-        // 1. Query each DNS seed hostname
-        // 2. Collect returned IP addresses
-        // 3. ALWAYS include fallback bootnodes (they have PeerIds)
-        // 4. Return combined result
-    }
+/// Fetch peer list from DNS Seed
+pub async fn fetch_peers_from_dns_seed(seed_url: &str) -> Result<Vec<PeerInfo>> {
+    let client = reqwest::Client::new();
+    let response = client.get(format!("{}/peers", seed_url))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+
+    let id_peers: IdPeersFile = response.json().await?;
+
+    // Verify Ed25519 signature before trusting peer list
+    verify_idpeers_signature(&id_peers)?;
+
+    Ok(id_peers.peers)
 }
 ```
+
+**IDpeers.json Format (received from DNS Seeds):**
+
+```json
+{
+  "version": 1,
+  "generated_at": "2025-12-23T10:00:00Z",
+  "ttl_seconds": 300,
+  "network_state": "Normal",
+  "peers": [
+    {
+      "peer_id": "a1b2c3d4...(64 hex chars)",
+      "libp2p_peer_id": "12D3KooWSpAybJ2D9DAt74StZYE4NA7Dbx9W9DxgyANyjT6g6GPn",
+      "addresses": ["/ip4/45.8.132.252/tcp/30333"],
+      "score": 950,
+      "is_validator": true,
+      "current_height": 12345,
+      "last_seen": 1703329200
+    }
+  ],
+  "signature": "hex-encoded-ed25519-signature",
+  "dns_seed_id": "hex-encoded-public-key"
+}
+```
+
+**Peer Fields:**
+- `peer_id`: Ed25519 public key (32 bytes hex) for signature verification
+- `libp2p_peer_id`: Base58 PeerId for multiaddr connection (used in `/ip4/.../tcp/.../p2p/<libp2p_peer_id>`)
+- `addresses`: Multiaddr list where the peer is reachable
 
 **Integration at Startup:**
+
 ```rust
 // In node/service.rs - KratOsNode::new()
 
-// 1. First, try DNS Seeds
-let mut dns_resolver = DnsSeedResolver::new();
-let dns_result = dns_resolver.resolve();
-bootstrap_addrs.extend(dns_result.peers);
+// 1. Fetch peers from DNS Seeds (signed IDpeers.json)
+for seed_ip in OFFICIAL_DNS_SEEDS {
+    let seed_url = format!("http://{}:8080", seed_ip);
+    if let Ok(peers) = fetch_peers_from_dns_seed(&seed_url).await {
+        bootstrap_addrs.extend(peers);
+    }
+}
 
-// 2. Add CLI bootnodes
+// 2. Always include fallback bootnodes
+for bootnode in FALLBACK_BOOTNODES {
+    bootstrap_addrs.push(parse_bootnode(bootnode)?);
+}
+
+// 3. Add CLI bootnodes
 for bootnode in &config.network.bootnodes {
     bootstrap_addrs.push(parse_bootnode(bootnode)?);
 }
 
-// 3. Register all peers with network
+// 4. Register all peers with network
 network.add_bootstrap_nodes(bootstrap_addrs);
 ```
 
+**Heartbeat Protocol (Node → DNS Seed):**
+
+Nodes periodically send signed heartbeats to DNS Seeds to register themselves:
+
+```rust
+pub struct HeartbeatMessage {
+    pub version: u32,              // Protocol version (currently 1)
+    pub peer_id: [u8; 32],         // Ed25519 public key (for signature verification)
+    pub libp2p_peer_id: String,    // libp2p PeerId base58 (for peer discovery)
+    pub addresses: Vec<String>,    // Multiaddr list (e.g., ["/ip4/1.2.3.4/tcp/30333"])
+    pub current_height: u64,       // Current block height
+    pub best_hash: [u8; 32],       // Best block hash
+    pub genesis_hash: [u8; 32],    // Genesis hash (for chain validation)
+    pub is_validator: bool,        // Is active validator
+    pub validator_count: Option<u32>,
+    pub total_stake: Option<u128>,
+    pub protocol_version: u32,
+    pub timestamp: u64,            // Unix timestamp
+    pub signature: [u8; 64],       // Ed25519 with domain separation
+}
+```
+
+**Key Fields:**
+- `peer_id`: Ed25519 public key (32 bytes) for **signature verification**
+- `libp2p_peer_id`: Base58 PeerId (e.g., `12D3KooW...`) for **peer connection**
+
+**Heartbeat Flow:**
+```
+Node                              DNS Seed (port 30334)
+  │                                     │
+  │─────── TCP Connect ────────────────►│
+  │                                     │
+  │─────── HeartbeatMessage ───────────►│
+  │        (signed with node key)       │
+  │                                     │
+  │◄────── NetworkStateInfo ────────────│
+  │        (current security state)     │
+  │                                     │
+  └───── Repeat every 2 minutes ────────┘
+```
+
 **Becoming a DNS Seed Operator:**
-1. Run a DNS seed server that crawls the network
-2. Maintain 99.9% uptime for 30 days
-3. Submit PR to add seed to official list
-4. Pass community review for independence
+1. Deploy the `kratos-dns-seed` application
+2. Configure heartbeat receiver (TCP port 30334)
+3. Maintain 99.9% uptime for 30 days
+4. Submit PR to add seed to official list
+5. Pass community review for independence
+
+**See Also:** [SPEC 6 §20 - DNS Seed Service](../spec/SPEC_6_NETWORK_SECURITY.md#20-dns-seed-service-kratos-dns-seed)
 
 ### Network Identity Persistence
 
@@ -507,7 +769,9 @@ async fn import_block(&self, block: Block) -> Result<(), NodeError> {
 
 **Key Points:**
 - Block rewards MUST be applied during import (not just during production)
-- Reward calculation uses the same logic: `BlockReward + 60% fees` to validator
+- Reward calculation uses the same logic: `BlockReward + 50% fees` to producer (SPEC v3.2)
+- 10% of fees go to finality voters (divided equally among participants)
+- 30% of fees are burned, 10% go to treasury
 - State root is computed AFTER applying rewards
 - Genesis state includes validators and balances from the genesis node
 
@@ -589,6 +853,7 @@ Built with warp, featuring:
 | **System** | `system_info`, `system_health`, `system_peers`, `system_syncState`, `system_version`, `system_name` |
 | **Mempool** | `mempool_status`, `mempool_content` |
 | **Clock** | `clock_getHealth`, `clock_getValidatorRecord` |
+| **Finality** | `finality_getStatus`, `finality_getLastFinalized`, `finality_getJustification`, `finality_getRoundInfo` |
 
 ### Quick Examples
 
@@ -860,22 +1125,42 @@ Defines initial state:
 
 ## Source Files Reference
 
+### kratos-core (Node Implementation)
+
 | Directory | Contents |
 |-----------|----------|
 | `src/cli/` | Command-line interface |
 | `src/node/` | Node service, producer, mempool |
 | `src/consensus/` | PoS, VRF, validation, slashing |
+| `src/consensus/finality/` | GRANDPA-style BFT finality gadget |
 | `src/network/` | libp2p networking |
+| `src/network/dns_seeds.rs` | DNS seed registry and resolution |
+| `src/network/dns_seed_client.rs` | DNS seed client (fetch IDpeers.json) |
 | `src/storage/` | RocksDB, state management |
 | `src/rpc/` | JSON-RPC server and methods |
 | `src/types/` | Core types (Block, Transaction, etc.) |
 | `src/contracts/` | System contracts (KRAT, staking) |
 | `src/genesis/` | Genesis configuration |
 
+### kratos-dns-seed (DNS Seed Service)
+
+| Directory | Contents |
+|-----------|----------|
+| `src/main.rs` | Application entry point |
+| `src/heartbeat/` | Heartbeat receiver (TCP:30334) |
+| `src/registry/` | Peer registry and scoring (RocksDB) |
+| `src/network_state/` | Network state aggregator |
+| `src/api/` | HTTP API (:8080) |
+| `src/dns/` | DNS server (UDP:53) |
+| `src/distribution/` | IDpeers.json generation |
+| `src/crypto/` | Ed25519 signatures and verification |
+| `src/types/` | Shared types (HeartbeatMessage, etc.) |
+
 ---
 
 **Implementation Status**: Complete
-**Last Updated**: 2025-12-21
+**Last Updated**: 2025-12-23
 **Runtime**: tokio async
 **Framework**: Native Rust (no Substrate)
 **Specification Version**: Unified (see [KRATOS_SYNTHESIS.md](KRATOS_SYNTHESIS.md))
+**DNS Seed Service**: See [SPEC 6 §20](../spec/SPEC_6_NETWORK_SECURITY.md#20-dns-seed-service-kratos-dns-seed)

@@ -3,6 +3,7 @@
 
 pub mod behaviour;
 pub mod dns_seeds;
+pub mod dns_seed_client;
 pub mod peer;
 pub mod protocol;
 pub mod rate_limit;
@@ -12,6 +13,11 @@ pub mod sync;
 pub mod warp_sync;
 
 pub use dns_seeds::{DnsSeedResolver, DnsSeedRegistry, DnsSeedInfo, parse_bootnode};
+pub use dns_seed_client::{
+    DnsSeedClient, HeartbeatService, HeartbeatMessage, HeartbeatResponse,
+    NetworkStateInfo, SecurityState, IdPeersFile, NodeInfo,
+    HEARTBEAT_PORT, HEARTBEAT_INTERVAL_SECS,
+};
 pub use peer::{PeerManager, PeerInfo, PeerState, PeerStats};
 pub use request::{
     BlockRequest, BlockResponse, SyncRequest, SyncResponse,

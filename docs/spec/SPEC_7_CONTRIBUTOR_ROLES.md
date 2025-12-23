@@ -362,10 +362,10 @@ The contributor system emits the following on-chain events:
 
 | File | Description |
 |------|-------------|
-| [contributor.rs](../rust/kratos-core/src/types/contributor.rs) | Core types: NetworkRole, NetworkRoleRegistry, ContributorRole |
-| [validator.rs](../rust/kratos-core/src/consensus/validator.rs) | ValidatorSet with integrated NetworkRoleRegistry |
-| [governance.rs](../rust/kratos-core/src/contracts/governance.rs) | Proposal integration |
-| [krat.rs](../rust/kratos-core/src/contracts/krat.rs) | Treasury distribution |
+| [contributor.rs](../../rust/kratos-core/src/types/contributor.rs) | Core types: NetworkRole, NetworkRoleRegistry, ContributorRole |
+| [validator.rs](../../rust/kratos-core/src/consensus/validator.rs) | ValidatorSet with integrated NetworkRoleRegistry |
+| [governance.rs](../../rust/kratos-core/src/contracts/governance.rs) | Proposal integration |
+| [krat.rs](../../rust/kratos-core/src/contracts/krat.rs) | Treasury distribution |
 
 ### 11.2 Constants
 

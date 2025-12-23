@@ -2338,10 +2338,20 @@ impl InflationCalculator {
 ///
 /// SECURITY FIX #27: Added validation in constructor and distribute()
 /// to ensure distribution always sums to 100% and no fees are lost.
+///
+/// Fee Distribution (SPEC v3.2):
+/// - Producer: 50% (block author)
+/// - Finality Voters: 10% (validators who participated in finality)
+/// - Burn: 30% (deflationary mechanism)
+/// - Treasury: 10% (network development)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeeDistribution {
-    /// Percentage to validators (0.0 - 1.0)
-    pub validators_share: f64,
+    /// Percentage to block producer (0.0 - 1.0)
+    pub producer_share: f64,
+
+    /// Percentage to finality voters (0.0 - 1.0)
+    /// Divided equally among validators who participated in finality round
+    pub finality_voters_share: f64,
 
     /// Percentage to burn (0.0 - 1.0)
     pub burn_share: f64,
@@ -2356,44 +2366,56 @@ pub enum FeeDistributionError {
     #[error("Distribution shares must sum to 1.0 (got {0})")]
     InvalidSum(f64),
 
-    #[error("All shares must be non-negative (validators={0}, burn={1}, treasury={2})")]
-    NegativeShare(f64, f64, f64),
+    #[error("All shares must be non-negative (producer={0}, finality={1}, burn={2}, treasury={3})")]
+    NegativeShare(f64, f64, f64, f64),
 }
 
 impl FeeDistribution {
-    /// Create default distribution (60/30/10)
-    /// SPEC v3.1: This is the canonical distribution
+    /// Create default distribution (50/10/30/10)
+    /// SPEC v3.2: Updated to include finality voters
+    /// - Producer: 50% (block author)
+    /// - Finality Voters: 10% (divided among participants)
+    /// - Burn: 30% (deflationary)
+    /// - Treasury: 10% (development fund)
     pub fn default_distribution() -> Self {
         Self {
-            validators_share: 0.60, // 60%
-            burn_share: 0.30,       // 30%
-            treasury_share: 0.10,   // 10%
+            producer_share: 0.50,         // 50%
+            finality_voters_share: 0.10,  // 10%
+            burn_share: 0.30,             // 30%
+            treasury_share: 0.10,         // 10%
         }
     }
 
     /// SECURITY FIX #27: Create with validation
     /// Returns error if shares don't sum to 1.0 or are negative
     pub fn new(
-        validators_share: f64,
+        producer_share: f64,
+        finality_voters_share: f64,
         burn_share: f64,
         treasury_share: f64,
     ) -> Result<Self, FeeDistributionError> {
         // Check for negative values
-        if validators_share < 0.0 || burn_share < 0.0 || treasury_share < 0.0 {
+        if producer_share < 0.0
+            || finality_voters_share < 0.0
+            || burn_share < 0.0
+            || treasury_share < 0.0
+        {
             return Err(FeeDistributionError::NegativeShare(
-                validators_share,
+                producer_share,
+                finality_voters_share,
                 burn_share,
                 treasury_share,
             ));
         }
 
-        let sum = validators_share + burn_share + treasury_share;
+        let sum = producer_share + finality_voters_share + burn_share + treasury_share;
         if (sum - 1.0).abs() >= 0.001 {
             return Err(FeeDistributionError::InvalidSum(sum));
         }
 
         Ok(Self {
-            validators_share,
+            producer_share,
+            finality_voters_share,
             burn_share,
             treasury_share,
         })
@@ -2401,33 +2423,85 @@ impl FeeDistribution {
 
     /// Validate distribution (must sum to 1.0)
     pub fn validate(&self) -> bool {
-        let sum = self.validators_share + self.burn_share + self.treasury_share;
+        let sum = self.producer_share
+            + self.finality_voters_share
+            + self.burn_share
+            + self.treasury_share;
         (sum - 1.0).abs() < 0.001
-            && self.validators_share >= 0.0
+            && self.producer_share >= 0.0
+            && self.finality_voters_share >= 0.0
             && self.burn_share >= 0.0
             && self.treasury_share >= 0.0
     }
 
     /// Distribute fee amount
     /// SECURITY FIX #27: Ensures no fees are lost due to rounding
-    pub fn distribute(&self, total_fee: Balance) -> (Balance, Balance, Balance) {
+    ///
+    /// Returns (producer_fees, finality_voters_fees, burn, treasury)
+    pub fn distribute(&self, total_fee: Balance) -> FeeDistributionResult {
         debug_assert!(self.validate(), "FeeDistribution must be valid");
 
-        let validators = (total_fee as f64 * self.validators_share) as Balance;
+        let producer = (total_fee as f64 * self.producer_share) as Balance;
+        let finality_voters = (total_fee as f64 * self.finality_voters_share) as Balance;
         let burn = (total_fee as f64 * self.burn_share) as Balance;
 
         // SECURITY FIX #27: Treasury gets the remainder to prevent fee loss
         // This handles rounding errors by assigning any residual to treasury
-        let treasury = total_fee.saturating_sub(validators).saturating_sub(burn);
+        let treasury = total_fee
+            .saturating_sub(producer)
+            .saturating_sub(finality_voters)
+            .saturating_sub(burn);
 
         // Sanity check: total distributed should equal total fee
         debug_assert_eq!(
-            validators.saturating_add(burn).saturating_add(treasury),
+            producer
+                .saturating_add(finality_voters)
+                .saturating_add(burn)
+                .saturating_add(treasury),
             total_fee,
             "Fee distribution must not lose any fees"
         );
 
-        (validators, burn, treasury)
+        FeeDistributionResult {
+            producer,
+            finality_voters,
+            burn,
+            treasury,
+        }
+    }
+}
+
+/// Result of fee distribution calculation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeeDistributionResult {
+    /// Fees to block producer
+    pub producer: Balance,
+    /// Fees to finality voters (to be divided among them)
+    pub finality_voters: Balance,
+    /// Fees to burn
+    pub burn: Balance,
+    /// Fees to treasury
+    pub treasury: Balance,
+}
+
+impl FeeDistributionResult {
+    /// Calculate per-voter share of finality fees
+    /// Returns 0 if no voters participated
+    pub fn per_voter_share(&self, num_voters: usize) -> Balance {
+        if num_voters == 0 {
+            0
+        } else {
+            self.finality_voters / num_voters as Balance
+        }
+    }
+
+    /// Get remainder after dividing among voters (goes to treasury)
+    pub fn voter_remainder(&self, num_voters: usize) -> Balance {
+        if num_voters == 0 {
+            self.finality_voters
+        } else {
+            self.finality_voters % num_voters as Balance
+        }
     }
 }
 
@@ -2498,7 +2572,8 @@ impl EconomicsManager {
     }
 
     /// Distribute fee
-    pub fn distribute_fee(&self, fee: Balance) -> (Balance, Balance, Balance) {
+    /// SPEC v3.2: Returns FeeDistributionResult with producer, finality_voters, burn, treasury
+    pub fn distribute_fee(&self, fee: Balance) -> FeeDistributionResult {
         self.fee_distribution.distribute(fee)
     }
 
@@ -2810,11 +2885,17 @@ mod tests {
 
         assert!(dist.validate());
 
-        let (validators, burn, treasury) = dist.distribute(1_000_000);
+        let result = dist.distribute(1_000_000);
 
-        assert_eq!(validators, 600_000); // 60%
-        assert_eq!(burn, 300_000);       // 30%
-        assert_eq!(treasury, 100_000);   // 10%
+        // SPEC v3.2: 50/10/30/10 distribution
+        assert_eq!(result.producer, 500_000);         // 50%
+        assert_eq!(result.finality_voters, 100_000);  // 10%
+        assert_eq!(result.burn, 300_000);             // 30%
+        assert_eq!(result.treasury, 100_000);         // 10%
+
+        // Test per-voter share calculation
+        assert_eq!(result.per_voter_share(3), 33_333); // 100k / 3
+        assert_eq!(result.voter_remainder(3), 1);      // 100k % 3 = 1
     }
 
     #[test]

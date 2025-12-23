@@ -44,6 +44,7 @@ impl RpcMethods {
             "state_getAccount" => self.state_get_account(request.id, request.params).await,
             "state_getBalance" => self.state_get_balance(request.id, request.params).await,
             "state_getNonce" => self.state_get_nonce(request.id, request.params).await,
+            "state_getTransactionHistory" => self.state_get_transaction_history(request.id, request.params).await,
 
             // Author methods (transaction submission)
             "author_submitTransaction" => self.author_submit_transaction(request.id, request.params).await,
@@ -71,6 +72,12 @@ impl RpcMethods {
             "validator_getPendingCandidates" => self.validator_get_pending_candidates(request.id).await,
             "validator_getCandidateVotes" => self.validator_get_candidate_votes(request.id, request.params).await,
             "validator_canVote" => self.validator_can_vote(request.id, request.params).await,
+
+            // Finality methods (GRANDPA-style)
+            "finality_getStatus" => self.finality_get_status(request.id).await,
+            "finality_getLastFinalized" => self.finality_get_last_finalized(request.id).await,
+            "finality_getJustification" => self.finality_get_justification(request.id, request.params).await,
+            "finality_getRoundInfo" => self.finality_get_round_info(request.id).await,
 
             // Unknown method
             _ => JsonRpcResponse::error(request.id, JsonRpcError::method_not_found(&request.method)),
@@ -302,6 +309,116 @@ impl RpcMethods {
             Ok(nonce) => JsonRpcResponse::success(id, nonce),
             Err(e) => JsonRpcResponse::error(id, JsonRpcError::internal_error(&format!("{:?}", e))),
         }
+    }
+
+    /// Get transaction history for an account
+    ///
+    /// Scans recent blocks to find transactions involving the specified account.
+    /// Returns transactions where the account is sender or recipient.
+    ///
+    /// Parameters: [address, limit (optional, default 50), offset (optional, default 0)]
+    async fn state_get_transaction_history(&self, id: JsonRpcId, params: serde_json::Value) -> JsonRpcResponse {
+        // Parse parameters
+        let (address_str, limit, _offset) = match params {
+            serde_json::Value::Array(arr) if !arr.is_empty() => {
+                let addr = match arr[0].as_str() {
+                    Some(s) => s.to_string(),
+                    None => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected address string")),
+                };
+                let limit = arr.get(1).and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+                let offset = arr.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                (addr, limit, offset)
+            }
+            _ => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected [address, limit?, offset?]")),
+        };
+
+        let account_id = match parse_account_id(&address_str) {
+            Ok(a) => a,
+            Err(e) => return JsonRpcResponse::error(id, JsonRpcError::invalid_params(&e)),
+        };
+
+        // Get current block height
+        let height = self.node.chain_height().await;
+
+        // Scan recent blocks (limit to last 1000 blocks for performance)
+        let max_scan_blocks: u64 = 1000;
+        let start_block = height.saturating_sub(max_scan_blocks);
+
+        let storage = self.node.storage();
+        let storage_guard = storage.read().await;
+
+        let mut transactions = Vec::new();
+
+        // Scan blocks from newest to oldest
+        for block_num in (start_block..=height).rev() {
+            if transactions.len() >= limit {
+                break;
+            }
+
+            if let Ok(Some(block)) = storage_guard.get_block_by_number(block_num) {
+                for tx in &block.body.transactions {
+                    // Check if this transaction involves the account
+                    let is_sender = tx.transaction.sender == account_id;
+                    let is_recipient = match &tx.transaction.call {
+                        TransactionCall::Transfer { to, .. } => *to == account_id,
+                        _ => false,
+                    };
+
+                    if is_sender || is_recipient {
+                        // Build transaction record
+                        let (tx_type, counterparty, amount) = match &tx.transaction.call {
+                            TransactionCall::Transfer { to, amount } => {
+                                let cp = if is_sender {
+                                    format!("0x{}", hex::encode(to.as_bytes()))
+                                } else {
+                                    format!("0x{}", hex::encode(tx.transaction.sender.as_bytes()))
+                                };
+                                ("Transfer", cp, *amount)
+                            }
+                            TransactionCall::Stake { amount } => ("Stake", address_str.clone(), *amount),
+                            TransactionCall::Unstake { amount } => ("Unstake", address_str.clone(), *amount),
+                            TransactionCall::RegisterValidator { stake } => ("RegisterValidator", address_str.clone(), *stake),
+                            TransactionCall::ProposeEarlyValidator { candidate } => {
+                                ("ProposeEarlyValidator", format!("0x{}", hex::encode(candidate.as_bytes())), 0)
+                            }
+                            TransactionCall::VoteEarlyValidator { candidate } => {
+                                ("VoteEarlyValidator", format!("0x{}", hex::encode(candidate.as_bytes())), 0)
+                            }
+                            _ => ("Other", address_str.clone(), 0),
+                        };
+
+                        let direction = if is_sender { "sent" } else { "received" };
+
+                        transactions.push(serde_json::json!({
+                            "hash": format!("0x{}", hex::encode(tx.hash().as_bytes())),
+                            "from": format!("0x{}", hex::encode(tx.transaction.sender.as_bytes())),
+                            "to": counterparty,
+                            "amount": amount,
+                            "amountFormatted": format!("{:.6} KRAT", amount as f64 / 1_000_000_000_000.0),
+                            "type": tx_type,
+                            "direction": direction,
+                            "nonce": tx.transaction.nonce,
+                            "timestamp": tx.transaction.timestamp,
+                            "blockNumber": block_num,
+                            "blockHash": format!("0x{}", hex::encode(block.hash().as_bytes())),
+                        }));
+
+                        if transactions.len() >= limit {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        JsonRpcResponse::success(id, serde_json::json!({
+            "address": address_str,
+            "transactions": transactions,
+            "count": transactions.len(),
+            "scannedBlocks": max_scan_blocks.min(height - start_block + 1),
+            "fromBlock": start_block,
+            "toBlock": height,
+        }))
     }
 
     // =========================================================================
@@ -747,6 +864,119 @@ impl RpcMethods {
                 "Unknown reason"
             }
         }))
+    }
+
+    // =========================================================================
+    // FINALITY METHODS (GRANDPA-style)
+    // =========================================================================
+
+    /// Get finality status
+    ///
+    /// Returns current finality state including last finalized block and round info
+    async fn finality_get_status(&self, id: JsonRpcId) -> JsonRpcResponse {
+        let height = self.node.chain_height().await;
+        let finality_info = self.node.finality_info().await;
+
+        JsonRpcResponse::success(id, serde_json::json!({
+            "enabled": true,
+            "last_finalized_block": finality_info.last_finalized_block,
+            "last_finalized_hash": format!("0x{}", hex::encode(finality_info.last_finalized_hash.as_bytes())),
+            "current_round": finality_info.current_round,
+            "current_epoch": finality_info.current_epoch,
+            "chain_height": height,
+            "finality_lag": height.saturating_sub(finality_info.last_finalized_block),
+            "total_validators": finality_info.total_validators,
+            "supermajority_threshold": "66%"
+        }))
+    }
+
+    /// Get last finalized block
+    async fn finality_get_last_finalized(&self, id: JsonRpcId) -> JsonRpcResponse {
+        let finality_info = self.node.finality_info().await;
+
+        JsonRpcResponse::success(id, serde_json::json!({
+            "block_number": finality_info.last_finalized_block,
+            "block_hash": format!("0x{}", hex::encode(finality_info.last_finalized_hash.as_bytes())),
+            "epoch": finality_info.current_epoch
+        }))
+    }
+
+    /// Get finality justification for a block
+    ///
+    /// Returns the finality justification (validator signatures) for a finalized block
+    async fn finality_get_justification(&self, id: JsonRpcId, params: serde_json::Value) -> JsonRpcResponse {
+        // Parse block number from params
+        let block_number: u64 = match params {
+            serde_json::Value::Array(arr) if !arr.is_empty() => {
+                match arr[0].as_u64() {
+                    Some(n) => n,
+                    None => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected block number")),
+                }
+            }
+            serde_json::Value::Number(n) => {
+                match n.as_u64() {
+                    Some(n) => n,
+                    None => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected block number")),
+                }
+            }
+            _ => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected [block_number]")),
+        };
+
+        match self.node.get_finality_justification(block_number).await {
+            Some(justification) => {
+                let signatures: Vec<serde_json::Value> = justification.signatures
+                    .iter()
+                    .map(|sig| serde_json::json!({
+                        "validator": format!("0x{}", hex::encode(sig.validator.as_bytes())),
+                        "signature": format!("0x{}", hex::encode(sig.signature.as_bytes()))
+                    }))
+                    .collect();
+
+                JsonRpcResponse::success(id, serde_json::json!({
+                    "block_number": justification.block_number,
+                    "block_hash": format!("0x{}", hex::encode(justification.block_hash.as_bytes())),
+                    "epoch": justification.epoch,
+                    "signatures": signatures,
+                    "signature_count": justification.signatures.len()
+                }))
+            }
+            None => {
+                JsonRpcResponse::success(id, serde_json::json!({
+                    "block_number": block_number,
+                    "justification": null,
+                    "message": "No justification found for this block (may not be finalized yet)"
+                }))
+            }
+        }
+    }
+
+    /// Get current finality round information
+    async fn finality_get_round_info(&self, id: JsonRpcId) -> JsonRpcResponse {
+        let round_info = self.node.finality_round_info().await;
+
+        match round_info {
+            Some(info) => {
+                JsonRpcResponse::success(id, serde_json::json!({
+                    "round": info.round,
+                    "epoch": info.epoch,
+                    "state": format!("{:?}", info.state),
+                    "prevote_count": info.prevote_count,
+                    "precommit_count": info.precommit_count,
+                    "target_block": info.target_block.map(|(n, h)| serde_json::json!({
+                        "number": n,
+                        "hash": format!("0x{}", hex::encode(h.as_bytes()))
+                    })),
+                    "total_validators": info.total_validators,
+                    "votes_needed": (info.total_validators * 2 + 2) / 3
+                }))
+            }
+            None => {
+                JsonRpcResponse::success(id, serde_json::json!({
+                    "active": false,
+                    "message": "No active finality round"
+                }))
+            }
+        }
     }
 
     // =========================================================================

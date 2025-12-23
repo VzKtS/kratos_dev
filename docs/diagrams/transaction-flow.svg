@@ -98,7 +98,9 @@
 
   <!-- Vertical connector -->
   <path d="M 785 280 L 785 340" stroke="#94A3B8" stroke-width="2" marker-end="url(#arrow)"/>
-  <text x="800" y="315" fill="#94A3B8" font-family="Arial" font-size="9">next slot</text>
+  <text x="800" y="305" fill="#94A3B8" font-family="Arial" font-size="9">next slot</text>
+  <text x="800" y="320" fill="#10B981" font-family="Arial" font-size="8">state-aware</text>
+  <text x="800" y="332" fill="#10B981" font-family="Arial" font-size="8">nonce check</text>
 
   <!-- Phase 5: Block Production -->
   <g filter="url(#shadow)">

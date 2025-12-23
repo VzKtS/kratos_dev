@@ -88,6 +88,7 @@ impl KratOsBehaviour {
             GossipTopic::Blocks,
             GossipTopic::Transactions,
             GossipTopic::Consensus,
+            GossipTopic::Finality,  // GRANDPA finality votes
         ];
 
         for topic in &topics {

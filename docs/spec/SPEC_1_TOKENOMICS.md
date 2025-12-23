@@ -165,13 +165,16 @@ b(t) = b_max - (b_max - b_0) × e^(-g × t)
 
 ## 6. Fee Distribution
 
-Transaction fees follow the **60/30/10 rule**:
+Transaction fees follow the **50/10/30/10 rule** (SPEC v3.2):
 
-| Recipient | Share |
-|-----------|-------|
-| Validators | 60% |
-| Burn | 30% |
-| Treasury | 10% |
+| Recipient | Share | Description |
+|-----------|-------|-------------|
+| Block Producer | 50% | Reward for producing the block |
+| Finality Voters | 10% | Shared among GRANDPA finality participants |
+| Burn | 30% | Permanently removed (deflationary) |
+| Treasury | 10% | Community-governed development fund |
+
+**Note:** The finality voters share is divided equally among all validators who participated in finalizing the block. If no finality voters participated, their share goes to Treasury.
 
 ---
 

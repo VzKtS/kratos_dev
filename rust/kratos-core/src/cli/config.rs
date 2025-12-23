@@ -34,6 +34,8 @@ pub struct NodeConfig {
     pub pruning: PruningMode,
     /// Database cache size in MB
     pub db_cache_mb: u32,
+    /// Enable GRANDPA finality debug traces
+    pub debug_grandpa: bool,
 }
 
 /// Sync modes
@@ -158,6 +160,7 @@ impl NodeConfig {
             sync_mode,
             pruning,
             db_cache_mb: cmd.db_cache,
+            debug_grandpa: cmd.debug_grandpa,
         })
     }
 
@@ -348,6 +351,7 @@ mod tests {
             public_addr: None,
             rpc_methods_unsafe: false,
             rpc_cors_all: false,
+            debug_grandpa: false,
         };
 
         let config = NodeConfig::from_run_cmd(&cmd).unwrap();
@@ -389,6 +393,7 @@ mod tests {
             public_addr: None,
             rpc_methods_unsafe: false,
             rpc_cors_all: false,
+            debug_grandpa: false,
         };
 
         let config = NodeConfig::from_run_cmd(&cmd).unwrap();
@@ -418,6 +423,7 @@ mod tests {
             public_addr: None,
             rpc_methods_unsafe: false,
             rpc_cors_all: false,
+            debug_grandpa: false,
         };
 
         let result = NodeConfig::from_run_cmd(&cmd);
@@ -446,6 +452,7 @@ mod tests {
             public_addr: None,
             rpc_methods_unsafe: false,
             rpc_cors_all: false,
+            debug_grandpa: false,
         };
 
         let config = NodeConfig::from_run_cmd(&cmd).unwrap();

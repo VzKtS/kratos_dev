@@ -523,6 +523,99 @@ Get clock drift record for a validator.
 
 ---
 
+### Finality Methods
+
+#### `finality_getStatus`
+
+Get current finality status.
+
+**Parameters**: None
+
+**Response**:
+```json
+{
+  "lastFinalizedBlock": 12345,
+  "lastFinalizedHash": "0x...",
+  "currentRound": 5,
+  "currentEpoch": 10,
+  "totalValidators": 3,
+  "roundState": "Precommitting"
+}
+```
+
+---
+
+#### `finality_getLastFinalized`
+
+Get last finalized block number and hash.
+
+**Parameters**: None
+
+**Response**:
+```json
+{
+  "blockNumber": 12345,
+  "blockHash": "0x..."
+}
+```
+
+---
+
+#### `finality_getJustification`
+
+Get finality justification for a block.
+
+**Parameters**: `[blockNumber: number]`
+
+**Response**:
+```json
+{
+  "blockNumber": 12345,
+  "blockHash": "0x...",
+  "signatures": [
+    {
+      "validator": "0x...",
+      "signature": "0x..."
+    }
+  ],
+  "epoch": 10
+}
+```
+
+**Note**: Returns `null` if block is not finalized.
+
+---
+
+#### `finality_getRoundInfo`
+
+Get information about the current finality round.
+
+**Parameters**: None
+
+**Response**:
+```json
+{
+  "round": 5,
+  "epoch": 10,
+  "state": "Precommitting",
+  "prevoteCount": 3,
+  "precommitCount": 2,
+  "targetBlock": {
+    "number": 12345,
+    "hash": "0x..."
+  },
+  "totalValidators": 3,
+  "timeRemaining": 4200
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `state` | `Prevoting`, `Precommitting`, `Completed`, or `Failed` |
+| `timeRemaining` | Milliseconds until round timeout |
+
+---
+
 ## Data Types
 
 ### Balance
@@ -753,12 +846,12 @@ Where `DOMAIN_TRANSACTION = "KRATOS_TRANSACTION_V1:"`
 
 | File | Description |
 |------|-------------|
-| [server.rs](../rust/kratos-core/src/rpc/server.rs) | HTTP server, CORS, rate limiting |
-| [methods.rs](../rust/kratos-core/src/rpc/methods.rs) | RPC method implementations |
-| [types.rs](../rust/kratos-core/src/rpc/types.rs) | Request/response types |
-| [rate_limit.rs](../rust/kratos-core/src/rpc/rate_limit.rs) | Rate limiting logic |
+| [server.rs](../../rust/kratos-core/src/rpc/server.rs) | HTTP server, CORS, rate limiting |
+| [methods.rs](../../rust/kratos-core/src/rpc/methods.rs) | RPC method implementations |
+| [types.rs](../../rust/kratos-core/src/rpc/types.rs) | Request/response types |
+| [rate_limit.rs](../../rust/kratos-core/src/rpc/rate_limit.rs) | Rate limiting logic |
 
 ---
 
-**Last Updated**: 2025-12-19
-**Version**: 1.0.0
+**Last Updated**: 2025-12-22
+**Version**: 1.1.0

@@ -1,12 +1,14 @@
 # SPEC 3: Consensus Mechanism
 
-**Version:** 2.0
+**Version:** 2.1
 **Status:** Normative
 **Last Updated:** 2025-12-22
 
 ### Changelog
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.2 | 2025-12-22 | Added §6.10 Node Integration, §6.11 Fee Distribution to Finality Voters |
+| 2.1 | 2025-12-22 | Added §5.3 State-Aware Transaction Selection (mempool nonce fix) |
 | 2.0 | 2025-12-22 | Added §12.5 Sync Rate-Limiting (cross-ref SPEC 6 §18) |
 | 1.9 | 2025-12-21 | Fixed deadlock in import_block() - VC initialization for early validators now uses outer storage lock |
 | 1.8 | 2025-12-21 | Added §18 Genesis State Verification (state root verification + idempotent import) |
@@ -120,7 +122,7 @@ epoch_randomness(0) = ZERO  // Genesis epoch
 
 Selected validator must:
 
-1. Gather pending transactions from mempool
+1. Gather pending transactions from mempool (state-aware selection)
 2. Execute transactions and compute state root
 3. Build block header with correct fields
 4. Sign block with validator key
@@ -140,20 +142,92 @@ Nodes validate received blocks:
 | State root | Matches post-execution state |
 | Timestamp | Within acceptable drift |
 
+### 5.3 State-Aware Transaction Selection
+
+When selecting transactions from the mempool for block inclusion, the producer MUST use state-aware nonce tracking to correctly handle accounts that have already executed transactions.
+
+**The Problem:**
+
+The basic `select_transactions()` function initializes expected nonce to 0 for each account. This causes transactions to be skipped when an account's on-chain nonce is > 0:
+
+```rust
+// BUG: Starts at nonce 0, ignoring on-chain state
+let expected_nonce = account_nonces.get(&sender).copied().unwrap_or(0);
+if entry.nonce > expected_nonce {
+    continue;  // Skips valid transactions with nonce > 0!
+}
+```
+
+**The Solution:**
+
+Use `select_transactions_with_state()` which queries the actual account nonce from chain state:
+
+```rust
+// CORRECT: Gets real nonce from state
+let expected_nonce = state.get_account(&sender)
+    .map(|a| a.nonce)
+    .unwrap_or(0);
+```
+
+**Implementation in produce_block():**
+
+```rust
+let transactions = {
+    let mempool_guard = mempool.read().await;
+    let mut state_guard = state.write().await;
+    mempool_guard.select_transactions_with_state(
+        self.config.max_transactions_per_block,
+        &mut state_guard,
+    )
+};
+```
+
+**Source:** `node/producer.rs:1083-1093`, `node/mempool.rs:775-825`
+
 ---
 
 ## 6. Finality
 
 ### 6.1 GRANDPA-Style Finality
 
-Blocks are finalized with supermajority agreement:
+Blocks are finalized with supermajority agreement using a two-phase voting protocol:
 
 | Parameter | Value |
 |-----------|-------|
-| Threshold | >= 2/3 validators |
+| Threshold | >= 2/3 validators (66%) |
+| Round Timeout | 6 seconds (1 block time) |
 | Data | FinalityJustification |
 
-### 6.2 Justification Structure
+**Implementation:** `consensus/finality/mod.rs`
+
+### 6.2 Finality Protocol
+
+The finality process uses GRANDPA-style rounds:
+
+1. **Prevote Phase:** Validators broadcast preferred block to finalize
+2. **Precommit Phase:** After 2/3 prevotes, validators precommit
+3. **Finalization:** When 2/3 precommits collected, block is finalized
+
+```rust
+pub enum VoteType {
+    Prevote,    // Phase 1: Intent to finalize
+    Precommit,  // Phase 2: Commit after supermajority prevotes
+}
+
+pub struct FinalityVote {
+    pub vote_type: VoteType,
+    pub target_number: BlockNumber,
+    pub target_hash: Hash,
+    pub round: u32,
+    pub epoch: EpochNumber,
+    pub voter: AccountId,
+    pub signature: Signature64,
+}
+```
+
+**Source:** `consensus/finality/types.rs`
+
+### 6.3 Justification Structure
 
 ```rust
 pub struct FinalityJustification {
@@ -164,11 +238,161 @@ pub struct FinalityJustification {
 }
 ```
 
-### 6.3 Finality Properties
+**Source:** `types/block.rs:169-243`
 
-- **Safety:** Finalized blocks cannot be reverted
+### 6.4 Vote Collection
+
+The `VoteCollector` aggregates votes and detects equivocation:
+
+```rust
+pub struct VoteCollector {
+    validators: HashSet<AccountId>,
+    prevotes: HashMap<(BlockNumber, Hash), Vec<FinalityVote>>,
+    precommits: HashMap<(BlockNumber, Hash), Vec<FinalityVote>>,
+    state: RoundState,  // Prevoting -> Precommitting -> Completed
+}
+```
+
+**Source:** `consensus/finality/votes.rs`
+
+### 6.5 Equivocation Detection
+
+Validators voting for different blocks in the same round are detected:
+
+```rust
+pub struct EquivocationProof {
+    pub validator: AccountId,
+    pub vote1: FinalityVote,
+    pub vote2: FinalityVote,
+    pub round: u32,
+    pub epoch: EpochNumber,
+}
+```
+
+Equivocation leads to slashing as defined in SPEC v5.
+
+### 6.6 Domain Separation
+
+All finality signatures use domain separation:
+
+```rust
+pub const DOMAIN_FINALITY: &[u8] = b"KRATOS_FINALITY_V1:";
+```
+
+This prevents cross-context signature replay attacks.
+
+**Source:** `types/signature.rs:68-71`
+
+### 6.7 Finality Properties
+
+- **Safety:** Finalized blocks cannot be reverted (with 2/3 honest validators)
 - **Liveness:** Eventually all blocks get finalized
 - **Determinism:** Same justification on all nodes
+- **Byzantine Tolerance:** Tolerates < 1/3 malicious validators
+
+### 6.8 Network Messages
+
+Finality uses dedicated gossip topic `/kratos/finality/1.0.0`:
+
+| Message | Purpose |
+|---------|---------|
+| `FinalityVote` | Broadcast prevote/precommit |
+| `FinalityJustification` | Announce finalization |
+| `FinalityVotesRequest` | Request votes for catch-up |
+| `FinalityVotesResponse` | Respond with historical votes |
+
+**Source:** `network/protocol.rs:106-128`
+
+### 6.9 RPC Methods
+
+| Method | Description |
+|--------|-------------|
+| `finality_getStatus` | Get finality state |
+| `finality_getLastFinalized` | Get last finalized block |
+| `finality_getJustification` | Get justification for block |
+| `finality_getRoundInfo` | Get current round info |
+
+**Source:** `rpc/methods.rs:876-980`
+
+### 6.10 Node Integration
+
+The finality gadget is integrated into the node service via `FinalityIntegration`:
+
+```rust
+/// Node-level finality coordinator
+pub struct FinalityIntegration<S: FinalitySigner, B: FinalityBroadcaster> {
+    gadget: RwLock<FinalityGadget<S, B>>,
+    last_finality_voters: RwLock<Vec<AccountId>>,
+    last_finalized: RwLock<BlockNumber>,
+    is_active: RwLock<bool>,
+}
+```
+
+**Initialization:** Finality is initialized for validators after node startup:
+
+```rust
+// In runner.rs
+if let Some(ref key) = validator_key {
+    node.initialize_finality(key.clone()).await;
+}
+```
+
+**Block Import Integration:** After each block is imported, finality is notified:
+
+```rust
+// In service.rs - import_block() and store_produced_block()
+self.notify_finality_block_imported(block.header.number, block_hash).await;
+```
+
+**Finality Tick Loop:** Periodic tick for timeout handling:
+
+```rust
+// In main event loop (runner.rs)
+_ = finality_tick_interval.tick() => {
+    node.tick_finality().await;
+    node.broadcast_finality_messages().await;
+}
+```
+
+**Source:** `node/finality_integration.rs`, `node/service.rs:1850-2000`, `cli/runner.rs:450-480`
+
+### 6.11 Fee Distribution to Finality Voters
+
+Validators who participate in block finalization receive 10% of transaction fees:
+
+| Recipient | Share | Description |
+|-----------|-------|-------------|
+| Block Producer | 50% | Primary reward for block production |
+| **Finality Voters** | **10%** | Shared equally among precommit signers |
+| Burn | 30% | Deflationary mechanism |
+| Treasury | 10% | Protocol development fund |
+
+**Distribution Logic:**
+
+```rust
+// In economics.rs
+pub fn distribute_fees(
+    total_fees: Balance,
+    producer: AccountId,
+    finality_voters: &[AccountId],
+) -> FeeDistributionResult {
+    let producer_share = total_fees * 50 / 100;
+    let finality_share = total_fees * 10 / 100;
+    let burn_share = total_fees * 30 / 100;
+    let treasury_share = total_fees * 10 / 100;
+
+    // Finality reward divided equally among voters
+    let per_voter = if !finality_voters.is_empty() {
+        finality_share / finality_voters.len() as u128
+    } else {
+        0
+    };
+
+    // ...
+}
+```
+
+**Source:** `consensus/economics.rs:180-250`
 
 ---
 

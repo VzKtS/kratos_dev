@@ -42,7 +42,9 @@ pub const MIN_DNS_SEEDS: usize = 1;
 /// 2. Submit a PR to add your seed to this list
 /// 3. Seeds are reviewed for reliability and independence
 pub const OFFICIAL_DNS_SEEDS: &[&str] = &[
-    "45.8.132.252",  // KratOs bootstrap node
+    "5.189.184.205",  // DNS Seed 1
+    "45.8.132.252",   // DNS Seed 2 (genesis node)
+    "74.208.14.99",   // DNS Seed 3
 ];
 
 /// Fallback hardcoded bootnodes for when DNS fails
@@ -50,7 +52,7 @@ pub const OFFICIAL_DNS_SEEDS: &[&str] = &[
 ///
 /// Format: /ip4/<IP>/tcp/<PORT>/p2p/<PEER_ID>
 pub const FALLBACK_BOOTNODES: &[&str] = &[
-    "/ip4/45.8.132.252/tcp/30333/p2p/12D3KooWQqYkkyLGuFS6YZprPShuVhn8Wrc1PUxbJ8pRisAYLndK",
+    "/ip4/45.8.132.252/tcp/30333/p2p/12D3KooWSpAybJ2D9DAt74StZYE4NA7Dbx9W9DxgyANyjT6g6GPn",
 ];
 
 // =============================================================================

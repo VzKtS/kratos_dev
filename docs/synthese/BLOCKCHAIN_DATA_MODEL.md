@@ -406,15 +406,15 @@ The network operates in different modes based on validator count:
 
 | File | Contents |
 |------|----------|
-| [transaction.rs](../rust/kratos-core/src/types/transaction.rs) | Transaction types |
-| [block.rs](../rust/kratos-core/src/types/block.rs) | Block structure |
-| [governance.rs](../rust/kratos-core/src/contracts/governance.rs) | Governance proposals |
-| [dispute.rs](../rust/kratos-core/src/types/dispute.rs) | Dispute arbitration |
-| [chain.rs](../rust/kratos-core/src/types/chain.rs) | Sidechain types |
-| [account.rs](../rust/kratos-core/src/types/account.rs) | Account types |
-| [contributor.rs](../rust/kratos-core/src/types/contributor.rs) | NetworkRole, NetworkRoleRegistry, ContributorRole |
-| [validator.rs](../rust/kratos-core/src/consensus/validator.rs) | ValidatorSet with integrated NetworkRoleRegistry |
-| [identity.rs](../rust/kratos-core/src/types/identity.rs) | Identity & pseudonymity system |
+| [transaction.rs](../../rust/kratos-core/src/types/transaction.rs) | Transaction types |
+| [block.rs](../../rust/kratos-core/src/types/block.rs) | Block structure |
+| [governance.rs](../../rust/kratos-core/src/contracts/governance.rs) | Governance proposals |
+| [dispute.rs](../../rust/kratos-core/src/types/dispute.rs) | Dispute arbitration |
+| [chain.rs](../../rust/kratos-core/src/types/chain.rs) | Sidechain types |
+| [account.rs](../../rust/kratos-core/src/types/account.rs) | Account types |
+| [contributor.rs](../../rust/kratos-core/src/types/contributor.rs) | NetworkRole, NetworkRoleRegistry, ContributorRole |
+| [validator.rs](../../rust/kratos-core/src/consensus/validator.rs) | ValidatorSet with integrated NetworkRoleRegistry |
+| [identity.rs](../../rust/kratos-core/src/types/identity.rs) | Identity & pseudonymity system |
 
 ---
 

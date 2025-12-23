@@ -15,7 +15,7 @@ use ed25519_dalek::SigningKey;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{info, warn, debug, error};
+use tracing::{info, warn, debug, error, trace};
 
 /// Run the node with the given configuration
 pub async fn run_node(config: NodeConfig) -> Result<(), RunnerError> {
@@ -80,11 +80,22 @@ pub async fn run_node(config: NodeConfig) -> Result<(), RunnerError> {
     info!("📡 P2P port: {}", config.chain.network.listen_port);
 
     if config.validator {
-        if validator_key.is_some() {
+        if let Some(ref key) = validator_key {
             info!("⚡ Validator mode: ACTIVE");
+
+            // Initialize finality gadget for validators
+            node.initialize_finality(key.clone()).await;
+
+            // Initialize DNS Seed client for heartbeats (use validator key)
+            node.initialize_dns_client(key.clone()).await;
         } else {
             warn!("⚠️  Validator mode enabled but no key loaded - will not produce blocks");
         }
+    } else {
+        // Non-validator nodes: generate a network identity key for DNS heartbeats
+        // This allows joining nodes to be discoverable via DNS Seeds
+        let network_key = load_or_generate_network_key(&config.base_path);
+        node.initialize_dns_client(network_key).await;
     }
 
     // Run the main event loop
@@ -120,6 +131,10 @@ async fn run_event_loop(
     // Network polling interval - poll frequently to ensure responsive network
     // CRITICAL: Without this, peer connections and genesis requests don't work!
     let mut network_poll_interval = tokio::time::interval(std::time::Duration::from_millis(100));
+
+    // Finality tick interval - matches round timeout (6 seconds = 1 slot)
+    // This handles finality round timeouts and state transitions
+    let mut finality_tick_interval = tokio::time::interval(std::time::Duration::from_secs(SLOT_DURATION_SECS));
 
     // Get genesis timestamp for slot calculation
     // CRITICAL: Must use the canonical genesis timestamp, not the current block timestamp
@@ -176,6 +191,18 @@ async fn run_event_loop(
             // Periodic stats logging
             _ = stats_interval.tick() => {
                 log_stats(&node).await;
+            }
+
+            // Finality tick - handles round timeouts and broadcasts pending messages
+            _ = finality_tick_interval.tick() => {
+                if config.validator && validator_key.is_some() {
+                    trace!("[GRANDPA] runner: finality tick triggered");
+                    // Tick the finality gadget to handle timeouts
+                    node.tick_finality().await;
+                    // Broadcast any pending finality messages
+                    node.broadcast_finality_messages().await;
+                    trace!("[GRANDPA] runner: finality tick completed");
+                }
             }
         }
     }
@@ -372,6 +399,95 @@ async fn handle_rpc_call(node: &Arc<KratOsNode>, call: RpcCall, config: &NodeCon
             }
         }
 
+        RpcCall::StateGetTransactionHistory(account_id, limit, _offset, resp) => {
+            use crate::types::TransactionCall;
+
+            // Get current block height
+            let height = node.chain_height().await;
+
+            // Scan recent blocks (limit to last 1000 blocks for performance)
+            let max_scan_blocks: u64 = 1000;
+            let start_block = height.saturating_sub(max_scan_blocks);
+
+            let storage = node.storage();
+            let storage_guard = storage.read().await;
+
+            let mut transactions = Vec::new();
+            let limit = limit as usize;
+
+            // Scan blocks from newest to oldest
+            for block_num in (start_block..=height).rev() {
+                if transactions.len() >= limit {
+                    break;
+                }
+
+                if let Ok(Some(block)) = storage_guard.get_block_by_number(block_num) {
+                    for tx in &block.body.transactions {
+                        // Check if this transaction involves the account
+                        let is_sender = tx.transaction.sender == account_id;
+                        let is_recipient = match &tx.transaction.call {
+                            TransactionCall::Transfer { to, .. } => *to == account_id,
+                            _ => false,
+                        };
+
+                        if is_sender || is_recipient {
+                            // Build transaction record
+                            let (tx_type, counterparty, amount) = match &tx.transaction.call {
+                                TransactionCall::Transfer { to, amount } => {
+                                    let cp = if is_sender {
+                                        format!("0x{}", hex::encode(to.as_bytes()))
+                                    } else {
+                                        format!("0x{}", hex::encode(tx.transaction.sender.as_bytes()))
+                                    };
+                                    ("Transfer", cp, *amount)
+                                }
+                                TransactionCall::Stake { amount } => ("Stake", format!("0x{}", hex::encode(account_id.as_bytes())), *amount),
+                                TransactionCall::Unstake { amount } => ("Unstake", format!("0x{}", hex::encode(account_id.as_bytes())), *amount),
+                                TransactionCall::RegisterValidator { stake } => ("RegisterValidator", format!("0x{}", hex::encode(account_id.as_bytes())), *stake),
+                                TransactionCall::ProposeEarlyValidator { candidate } => {
+                                    ("ProposeEarlyValidator", format!("0x{}", hex::encode(candidate.as_bytes())), 0)
+                                }
+                                TransactionCall::VoteEarlyValidator { candidate } => {
+                                    ("VoteEarlyValidator", format!("0x{}", hex::encode(candidate.as_bytes())), 0)
+                                }
+                                _ => ("Other", format!("0x{}", hex::encode(account_id.as_bytes())), 0),
+                            };
+
+                            let direction = if is_sender { "sent" } else { "received" };
+
+                            transactions.push(serde_json::json!({
+                                "hash": format!("0x{}", hex::encode(tx.hash().as_bytes())),
+                                "from": format!("0x{}", hex::encode(tx.transaction.sender.as_bytes())),
+                                "to": counterparty,
+                                "amount": amount,
+                                "amountFormatted": format!("{:.6} KRAT", amount as f64 / 1_000_000_000_000.0),
+                                "type": tx_type,
+                                "direction": direction,
+                                "nonce": tx.transaction.nonce,
+                                "timestamp": tx.transaction.timestamp,
+                                "blockNumber": block_num,
+                                "blockHash": format!("0x{}", hex::encode(block.hash().as_bytes())),
+                            }));
+
+                            if transactions.len() >= limit {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let result = serde_json::json!({
+                "address": format!("0x{}", hex::encode(account_id.as_bytes())),
+                "transactions": transactions,
+                "count": transactions.len(),
+                "scannedBlocks": max_scan_blocks.min(height - start_block + 1),
+                "fromBlock": start_block,
+                "toBlock": height,
+            });
+            let _ = resp.send(Ok(result));
+        }
+
         // Early Validator Voting methods (Bootstrap Era)
         RpcCall::ValidatorGetEarlyVotingStatus(resp) => {
             use crate::consensus::validator::{BOOTSTRAP_ERA_BLOCKS, MAX_EARLY_VALIDATORS, ValidatorSet};
@@ -535,6 +651,9 @@ async fn perform_maintenance(node: &Arc<KratOsNode>) {
     if !node.is_synced().await {
         node.start_sync().await;
     }
+
+    // Send heartbeats to DNS Seeds (every 4 cycles = 120 seconds)
+    node.send_dns_heartbeats().await;
 }
 
 /// Log node statistics
@@ -646,6 +765,41 @@ fn load_validator_key(config: &NodeConfig) -> Result<Option<SigningKey>, RunnerE
     warn!("   Generate with: kratos-node key generate -o validator.json");
 
     Ok(None)
+}
+
+/// Load or generate a network identity key for DNS Seed heartbeats
+///
+/// Non-validator nodes use this key to sign heartbeats.
+/// The key is stored in the data directory and reused across restarts.
+fn load_or_generate_network_key(base_path: &std::path::Path) -> SigningKey {
+    use rand::rngs::OsRng;
+
+    let key_path = base_path.join("network_identity.key");
+
+    // Try to load existing key
+    if key_path.exists() {
+        if let Ok(key_bytes) = std::fs::read(&key_path) {
+            if key_bytes.len() == 32 {
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(&key_bytes);
+                debug!("🔑 Loaded network identity key from {:?}", key_path);
+                return SigningKey::from_bytes(&bytes);
+            }
+        }
+    }
+
+    // Generate new key
+    info!("🔑 Generating network identity key for DNS heartbeats");
+    let signing_key = SigningKey::generate(&mut OsRng);
+
+    // Save key for reuse
+    if let Err(e) = std::fs::write(&key_path, signing_key.to_bytes()) {
+        warn!("Failed to save network identity key: {}", e);
+    } else {
+        debug!("🔑 Saved network identity key to {:?}", key_path);
+    }
+
+    signing_key
 }
 
 #[cfg(test)]

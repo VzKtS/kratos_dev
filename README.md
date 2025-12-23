@@ -1,15 +1,235 @@
 # KratOs - Decentralized Governance Blockchain
 
-> **VERSION: DEVELOPMENT - NON FUNCTIONAL**
+---
+
+## Vision Report
+
+> *"The creator/founder (Vzcrow) will launch the blockchain's development without any financial or technical advantage and will be subject to community votes and consensus mechanisms, like all other participants. Their status as a validator (guarantor of network security) can be revoked, resulting in the loss of the associated KRAT (the network's native token) revenue."*
+
+### A Decentralized Infrastructure for Human Coordination
+
+#### 1. Introduction
+
+KratOs is not a blockchain designed to optimize transactions, speculation, or short-term efficiency. It is an attempt to address a much more difficult question:
+
+**How can large groups of humans coordinate, decide, and coexist over the long term without central authority, without collapsing under their own complexity, and without being captured by wealth, ideology, or technology?**
+
+KratOs is a long-term human governance protocol, designed on the premise that:
+- humans are imperfect,
+- power corrupts,
+- communities diverge,
+- no social model remains stable forever.
+
+#### 2. The Fundamental Problem KratOs Seeks to Solve
+
+Modern governance systems fail for structural reasons:
+- Centralization accumulates power faster than accountability.
+- Democracy degrades when it exceeds local scale.
+- Economic capital becomes political capital.
+- Digital systems optimize for speed, not legitimacy.
+- A central failure propagates throughout the entire system.
+
+Blockchains have attempted to provide an answer, but most have reproduced the same flaws:
+- stake becomes power,
+- early adopters dominate permanently,
+- governance becomes speculative,
+- systems collapse under social pressure rather than technical failure.
+
+**KratOs starts from a different premise:**
+*Governance must be slow, local, revocable, and allowed to fail in isolation.*
+
+#### 3. Founding Philosophy
+
+KratOs rests on five philosophical axioms:
+
+**3.1 Imperfection Is Inevitable**
+The system does not seek to eliminate conflicts or bad decisions. It seeks to contain them.
+
+**3.2 Power Must Accumulate Slowly**
+Any form of influence—economic, political, or technical—must require time, not just capital.
+
+**3.3 Exit Is More Important Than Voice**
+The ability to leave, fork, or dissolve is more stabilizing than endless debate.
+
+**3.4 All Politics Is Local**
+Global consensus is fragile. Local governance is resilient.
+
+**3.5 No Layer Should Be Mandatory**
+Identity, ideology, federation, and governance models must remain optional.
+
+#### 4. What KratOs Is (and What It Is Not)
+
+**KratOs is:**
+- a minimal root chain providing security and finality,
+- an infrastructure for sovereign communities (sidechains),
+- a framework for voluntary federation,
+- a long-term experiment in human coordination.
+
+**KratOs is not:**
+- a replacement for states,
+- a global democracy,
+- a universal identity system,
+- a financial product.
+
+#### 5. Architectural Vision
+
+**5.1 A Minimal and Durable Core**
+
+The root chain (L0) is intentionally limited to:
+- consensus,
+- staking,
+- monetary issuance,
+- sidechain registry,
+- fork mechanisms.
+
+It does not contain:
+- social rules,
+- ideology,
+- imposed identity,
+- definitions of human rights.
+
+*This minimalism is deliberate: the core must survive political, cultural, and technological upheavals.*
+
+**5.2 Sidechains as Living Communities**
+
+Each community exists as a sidechain:
+- with its own rules,
+- its own local governance,
+- its own lifecycle.
+
+Communities can:
+- be freely created,
+- grow,
+- split,
+- federate,
+- or disappear.
+
+*Failure is not catastrophic—it is expected.*
+
+**5.3 Federation Without Domination**
+
+Host chains allow communities to:
+- pool resources,
+- coordinate policies,
+- share infrastructure.
+
+But federation is always:
+- voluntary,
+- revocable,
+- limited.
+
+*There is no level of "global government."*
+
+#### 6. Power, Merit, and Time
+
+**6.1 Breaking the Wealth = Power Equation**
+
+KratOs explicitly separates:
+- economic capital (security),
+- reputation (Validator Credits),
+- governance rights (local and contextualized).
+
+*No single variable allows domination of the system.*
+
+**6.2 Time as a Fundamental Resource**
+
+In KratOs, influence requires:
+- long-term participation,
+- repeated honest behavior,
+- visible contribution.
+
+Power thus becomes:
+- difficult to buy,
+- slow to accumulate,
+- easy to lose through inactivity or abuse.
+
+#### 7. Economic Vision
+
+The KRAT token is not a promise of profit. It is:
+- a coordination cost,
+- a security guarantee,
+- an anti-spam and anti-capture mechanism.
+
+Inflation is:
+- higher when the system is fragile,
+- lower when it is stable,
+- adaptive to actual usage.
+
+Over the long term, the system tends toward:
+- low inflation,
+- sustainability through fees,
+- lasting equilibrium.
+
+#### 8. Resilience by Design
+
+KratOs is designed to survive:
+- validator cartels,
+- ideological splits,
+- mass abandonment,
+- state capture attempts,
+- regulatory pressure,
+- social conflicts,
+- technological obsolescence.
+
+It achieves this by ensuring that:
+- no failure is global,
+- no community is permanent,
+- no decision is irreversible.
+
+#### 9. A System Aware of Its Limits
+
+KratOs does not claim to solve:
+- human disagreements,
+- moral conflicts,
+- political violence,
+- cultural divergences.
+
+It provides:
+- clear boundaries,
+- rules of interaction,
+- mechanisms for peaceful separation.
+
+*A system that assumes harmony fails.*
+*A system that assumes conflict can endure.*
+
+#### 10. Long-Term Ambition
+
+If it succeeds, KratOs could become:
+- a foundation for digital cities,
+- an infrastructure for cooperative economies,
+- a neutral ground for governance experiments,
+- a memory of institutional evolution.
+
+But success is not domination. Success is:
+- longevity,
+- adaptability,
+- peaceful fragmentation.
+
+#### 11. Final Declaration
+
+KratOs is not designed to win a market.
+It is designed to outlast cycles.
+
+It sacrifices speed for legitimacy,
+efficiency for resilience,
+simplicity for depth.
+
+**KratOs is not the promise of a better world.**
+
+**It is a framework allowing many worlds to coexist—and fail—without destroying each other.**
+
+---
+
+> **VERSION: DEVNET - FUNCTIONAL**
 >
-> This is an active development branch. The code is not ready for production use.
-> Pull requests and contributions are welcome.
+> The core blockchain is now functional with multi-node consensus and KRAT transfers working.
+> Currently running on devnet with 2+ validator nodes.
 >
 > **Roadmap:**
-> - `kratos_dev` (here) → Development & Devnet
+> - `kratos_dev` (here) → Development & Devnet ✅
 > - [`KratOs`](https://github.com/VzKtS/KratOs) → Testnet & Mainnet
 >
-> Once Dev and Devnet phases are complete, the project will be merged into the main repository.
+> Once Devnet phase is complete, the project will be merged into the main repository.
 
 ---
 
@@ -25,10 +245,22 @@ KratOs is a minimalist, auditable blockchain platform built entirely from scratc
 
 | Metric | Value |
 |--------|-------|
-| **Lines of Code** | ~33,000 |
-| **Tests Passing** | 560 |
+| **Lines of Code** | ~35,000 |
+| **Tests Passing** | 560+ |
 | **Spec Compliance** | v1-v8 |
 | **Architecture** | From-scratch Rust |
+| **Network Status** | Devnet (2+ nodes) |
+| **Consensus** | VRF-based PoS |
+| **Wallet** | CLI wallet functional |
+
+### Recent Achievements
+
+- ✅ Multi-node devnet running (VPS + local nodes)
+- ✅ KRAT transfers working between nodes
+- ✅ Block synchronization with peer discovery
+- ✅ VRF slot leader election operational
+- ✅ Transaction history RPC implemented
+- ✅ CLI wallet with encrypted key storage
 
 ## Architecture
 
@@ -104,9 +336,19 @@ KratOs is a minimalist, auditable blockchain platform built entirely from scratc
 | `genesis/` | Genesis block configuration |
 | `network/` | P2P networking, sync |
 | `node/` | Node service, mempool, producer |
-| `rpc/` | JSON-RPC server |
+| `rpc/` | JSON-RPC server (20+ methods) |
 | `storage/` | RocksDB state storage |
 | `tests/` | Integration & invariant tests |
+
+### Wallet (`kratos-wallet/`)
+
+| Module | Purpose |
+|--------|---------|
+| `main.rs` | CLI interface, commands |
+| `crypto.rs` | Ed25519 keys, Argon2 encryption |
+| `rpc.rs` | JSON-RPC client |
+| `storage.rs` | Encrypted wallet storage |
+| `types.rs` | Transaction types, history |
 
 ## Implemented Specifications
 
@@ -204,11 +446,42 @@ cargo test
 ### Run Node
 
 ```bash
-# Development mode
+# Development mode (solo validator)
 ./target/release/kratos-node --dev
 
-# With custom port
-./target/release/kratos-node --rpc-port 9933
+# Bootstrap node (first node in network)
+./target/release/kratos-node \
+  --validator \
+  --rpc-port 9933 \
+  --p2p-port 30333 \
+  --base-path ~/.kratos-node1
+
+# Join existing network
+./target/release/kratos-node \
+  --validator \
+  --rpc-port 9934 \
+  --p2p-port 30334 \
+  --base-path ~/.kratos-node2 \
+  --bootnodes "/ip4/<IP>/tcp/30333/p2p/<PEER_ID>"
+```
+
+### Run Wallet
+
+```bash
+cd rust/kratos-wallet
+cargo build --release
+
+# Create new wallet
+./target/release/kratos-wallet create
+
+# Check balance
+./target/release/kratos-wallet balance
+
+# Send KRAT
+./target/release/kratos-wallet send <ADDRESS> <AMOUNT>
+
+# View transaction history
+./target/release/kratos-wallet history
 ```
 
 ## Test Coverage
@@ -230,29 +503,48 @@ Breakdown:
 ```
 KratOs/
 ├── rust/
-│   └── kratos-core/
+│   ├── kratos-core/              # Main blockchain node
+│   │   └── src/
+│   │       ├── main.rs           # Node entry point
+│   │       ├── cli/              # CLI runner, argument parsing
+│   │       ├── types/            # Core data types (15 modules)
+│   │       ├── contracts/        # System contracts (13 modules)
+│   │       ├── consensus/        # VRF consensus, validator selection
+│   │       ├── execution/        # Transaction execution engine
+│   │       ├── genesis/          # Genesis block configuration
+│   │       ├── network/          # libp2p networking, sync, DNS seeds
+│   │       ├── node/             # Node service, mempool, block producer
+│   │       ├── rpc/              # JSON-RPC server (20+ methods)
+│   │       ├── storage/          # RocksDB state storage
+│   │       └── tests/            # Integration tests
+│   │
+│   └── kratos-wallet/            # CLI wallet
 │       └── src/
-│           ├── main.rs           # Node entry point
-│           ├── types/            # Core data types (15 modules)
-│           ├── contracts/        # System contracts (13 modules)
-│           ├── consensus/        # VRF consensus
-│           ├── execution/        # Transaction execution
-│           ├── genesis/          # Genesis configuration
-│           ├── network/          # P2P networking
-│           ├── node/             # Node service
-│           ├── rpc/              # JSON-RPC API
-│           ├── storage/          # RocksDB storage
-│           └── tests/            # Integration tests
-└── spec/
-    ├── SPEC_V1_VALIDATOR_CREDITS.md
-    ├── SPEC_V2_ECONOMICS.md
-    ├── SPEC_V3.1_RECONCILIATION.md
-    ├── SPEC_V4_RECONCILIATION.md
-    ├── SPEC_V5_RECONCILIATION.md
-    ├── SPEC_V6_RECONCILIATION.md
-    ├── SPEC_V7_RECONCILIATION.md
-    ├── SPEC_V8_RECONCILIATION.md
-    └── IMPLEMENTATION_LOG_*.md
+│           ├── main.rs           # CLI commands (create, send, balance, history)
+│           ├── crypto.rs         # Ed25519 + Argon2 encryption
+│           ├── rpc.rs            # JSON-RPC client
+│           ├── storage.rs        # Encrypted wallet file storage
+│           └── types.rs          # Transaction types
+│
+├── spec/                         # Protocol specifications
+│   ├── SPEC_1_TOKEN.md           # KRAT token specification
+│   ├── SPEC_2_ECONOMICS.md       # Economic model
+│   ├── SPEC_3_CONSENSUS.md       # VRF consensus
+│   ├── SPEC_4_IDENTITY.md        # Identity system
+│   ├── SPEC_5_SECURITY.md        # Security invariants
+│   ├── SPEC_6_NETWORK_SECURITY.md # Network security
+│   ├── SPEC_7_EMERGENCY.md       # Emergency powers
+│   └── SPEC_8_WALLET.md          # Wallet specification
+│
+├── synthese/                     # Technical synthesis documents
+│   ├── KRATOS_SYNTHESIS.md       # Main technical overview
+│   └── WALLET_SYNTHESIS.md       # Wallet architecture
+│
+└── docs/
+    └── diagrams/                 # Architecture diagrams (SVG)
+        ├── block-production-flow.svg
+        ├── transaction-flow.svg
+        └── ...
 ```
 
 ## Key Design Decisions
@@ -278,6 +570,46 @@ KratOs/
 3. **Flexibility** - Different chains, different rules
 4. **Exit rights** - Always possible to leave
 
+## JSON-RPC API
+
+### State Methods
+
+| Method | Description |
+|--------|-------------|
+| `state_getAccount` | Get account info (balance, nonce) |
+| `state_getNonce` | Get account nonce |
+| `state_getTransactionHistory` | Get transaction history for address |
+
+### Chain Methods
+
+| Method | Description |
+|--------|-------------|
+| `chain_getInfo` | Get chain info (height, hash, sync status) |
+| `chain_getBlock` | Get block by hash |
+| `chain_getBlockByNumber` | Get block by number |
+
+### Author Methods
+
+| Method | Description |
+|--------|-------------|
+| `author_submitTransaction` | Submit signed transaction |
+
+### Validator Methods (Bootstrap Era)
+
+| Method | Description |
+|--------|-------------|
+| `validator_getEarlyVotingStatus` | Get bootstrap voting status |
+| `validator_getPendingCandidates` | List validator candidates |
+| `validator_getCandidateVotes` | Get votes for candidate |
+| `validator_canVote` | Check if account can vote |
+
+### System Methods
+
+| Method | Description |
+|--------|-------------|
+| `system_health` | Node health check |
+| `system_peers` | List connected peers |
+
 ## Roadmap
 
 ### Completed
@@ -289,17 +621,24 @@ KratOs/
 - [x] Emergency powers system
 - [x] Fork management system
 - [x] 560 tests passing
+- [x] P2P networking (libp2p)
+- [x] Block synchronization
+- [x] Multi-node devnet
+- [x] CLI wallet with encryption
+- [x] Transaction history RPC
+- [x] KRAT transfers
 
 ### In Progress
-- [ ] P2P networking finalization
-- [ ] Block synchronization
-- [ ] Multi-node testnet
+- [ ] Early validator voting system
+- [ ] Block explorer backend
+- [ ] Improved peer discovery
 
 ### Planned
 - [ ] Light client support
 - [ ] WebSocket subscriptions
-- [ ] Block explorer
-- [ ] Wallet integration
+- [ ] Block explorer frontend
+- [ ] Mobile wallet
+- [ ] Testnet launch
 - [ ] Mainnet launch
 
 ## Contributing
@@ -315,10 +654,38 @@ We welcome contributions! Key areas:
 
 Apache License 2.0 - See LICENSE file
 
+## Network Configuration
+
+### Genesis Validators
+
+The network starts with bootstrap validators who can produce blocks and vote for new validators:
+
+| Validator | Address | Initial Balance |
+|-----------|---------|-----------------|
+| Bootstrap 1 | `0x0101...0101` | 10,000,000 KRAT |
+| Bootstrap 2 | `0x0202...0202` | 10,000,000 KRAT |
+
+### Block Parameters
+
+| Parameter | Value |
+|-----------|-------|
+| Block Time | 6 seconds |
+| Block Reward | ~12.37 KRAT |
+| Max Block Size | 1 MB |
+| Transaction Fee | 0.001 KRAT base |
+
+### Network Ports
+
+| Port | Purpose |
+|------|---------|
+| 9933 | JSON-RPC HTTP |
+| 30333 | P2P libp2p |
+
 ## Links
 
 - **Specifications**: `/spec/` directory
-- **Implementation Logs**: `/spec/IMPLEMENTATION_LOG_*.md`
+- **Technical Synthesis**: `/synthese/` directory
+- **Architecture Diagrams**: `/docs/diagrams/`
 - **Tests**: `/rust/kratos-core/src/tests/`
 
 ---

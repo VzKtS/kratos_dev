@@ -39,6 +39,7 @@ pub enum RpcCall {
     GetVersion(oneshot::Sender<String>),
     // State queries
     StateGetNonce(AccountId, oneshot::Sender<Result<u64, String>>),
+    StateGetTransactionHistory(AccountId, u32, u32, oneshot::Sender<Result<serde_json::Value, String>>),
     // Early Validator Voting methods (Bootstrap Era)
     ValidatorGetEarlyVotingStatus(oneshot::Sender<Result<serde_json::Value, String>>),
     ValidatorGetPendingCandidates(oneshot::Sender<Result<serde_json::Value, String>>),
@@ -353,6 +354,7 @@ async fn route_request(request: JsonRpcRequest, state: &RpcState) -> JsonRpcResp
         "state_getAccount" => handle_state_get_account(request.id, request.params, state).await,
         "state_getBalance" => handle_state_get_balance(request.id, request.params, state).await,
         "state_getNonce" => handle_state_get_nonce(request.id, request.params, state).await,
+        "state_getTransactionHistory" => handle_state_get_transaction_history(request.id, request.params, state).await,
 
         // Author methods
         "author_submitTransaction" => handle_submit_transaction(request.id, request.params, state).await,
@@ -506,6 +508,37 @@ async fn handle_state_get_nonce(id: JsonRpcId, params: serde_json::Value, state:
     }
     match rx.await {
         Ok(Ok(nonce)) => JsonRpcResponse::success(id, nonce),
+        Ok(Err(e)) => JsonRpcResponse::error(id, JsonRpcError::internal_error(&e)),
+        Err(_) => JsonRpcResponse::error(id, JsonRpcError::internal_error("Request timeout")),
+    }
+}
+
+async fn handle_state_get_transaction_history(id: JsonRpcId, params: serde_json::Value, state: &RpcState) -> JsonRpcResponse {
+    // Parse parameters: [address, limit?, offset?]
+    let (address_str, limit, offset) = match params {
+        serde_json::Value::Array(arr) if !arr.is_empty() => {
+            let addr = match arr[0].as_str() {
+                Some(s) => s.to_string(),
+                None => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected address string")),
+            };
+            let limit = arr.get(1).and_then(|v| v.as_u64()).unwrap_or(50) as u32;
+            let offset = arr.get(2).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            (addr, limit, offset)
+        }
+        _ => return JsonRpcResponse::error(id, JsonRpcError::invalid_params("Expected [address, limit?, offset?]")),
+    };
+
+    let account_id = match parse_account_id(&address_str) {
+        Ok(a) => a,
+        Err(e) => return JsonRpcResponse::error(id, JsonRpcError::invalid_params(&e)),
+    };
+
+    let (tx, rx) = oneshot::channel();
+    if state.tx.send(RpcCall::StateGetTransactionHistory(account_id, limit, offset, tx)).is_err() {
+        return JsonRpcResponse::error(id, JsonRpcError::internal_error("Node unavailable"));
+    }
+    match rx.await {
+        Ok(Ok(history)) => JsonRpcResponse::success(id, history),
         Ok(Err(e)) => JsonRpcResponse::error(id, JsonRpcError::internal_error(&e)),
         Err(_) => JsonRpcResponse::error(id, JsonRpcError::internal_error("Request timeout")),
     }

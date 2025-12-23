@@ -253,11 +253,12 @@ Tokens are emitted in 30-day periods:
 
 ## Fee Distribution
 
-Transaction fees follow the **60/30/10 rule** (SPEC v3.1):
+Transaction fees follow the **50/10/30/10 rule** (SPEC v3.2):
 
 | Recipient | Share | Description |
 |-----------|-------|-------------|
-| **Validators** | 60% | Block producer rewards |
+| **Block Producer** | 50% | Reward for producing the block |
+| **Finality Voters** | 10% | Shared among GRANDPA finality participants |
 | **Burn** | 30% | Permanently removed from circulation |
 | **Treasury** | 10% | Community-governed development fund |
 
@@ -265,12 +266,15 @@ Transaction fees follow the **60/30/10 rule** (SPEC v3.1):
 // From economics.rs
 pub fn default_distribution() -> FeeDistribution {
     FeeDistribution {
-        validators_share: 0.60,
+        producer_share: 0.50,
+        finality_voters_share: 0.10,
         burn_share: 0.30,
         treasury_share: 0.10,
     }
 }
 ```
+
+**Note:** The finality voters share is divided equally among all validators who participated in finalizing the block. If no finality voters participated, their share goes to Treasury.
 
 ---
 
@@ -497,11 +501,11 @@ pub const OPTIMAL_VALIDATORS: u32 = 101;
 
 | File | Contents |
 |------|----------|
-| [krat.rs](../rust/kratos-core/src/contracts/krat.rs) | Token constants, emission calculation, TokenomicsState |
-| [economics.rs](../rust/kratos-core/src/consensus/economics.rs) | Bootstrap config, fee distribution, network states |
-| [slashing.rs](../rust/kratos-core/src/consensus/slashing.rs) | Slashing penalties and severity levels |
-| [validator.rs](../rust/kratos-core/src/consensus/validator.rs) | Validator staking and unbonding |
-| [producer.rs](../rust/kratos-core/src/node/producer.rs) | Block rewards calculation |
+| [krat.rs](../../rust/kratos-core/src/contracts/krat.rs) | Token constants, emission calculation, TokenomicsState |
+| [economics.rs](../../rust/kratos-core/src/consensus/economics.rs) | Bootstrap config, fee distribution, network states |
+| [slashing.rs](../../rust/kratos-core/src/consensus/slashing.rs) | Slashing penalties and severity levels |
+| [validator.rs](../../rust/kratos-core/src/consensus/validator.rs) | Validator staking and unbonding |
+| [producer.rs](../../rust/kratos-core/src/node/producer.rs) | Block rewards calculation |
 
 ---
 

@@ -12,4 +12,5 @@ pub mod slashing;
 pub mod vc_decay;
 pub mod economics;
 pub mod clock_health;
+pub mod finality;
 

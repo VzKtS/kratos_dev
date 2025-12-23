@@ -1,8 +1,8 @@
 # KratOs Protocol Synthesis
 
-**Version:** 1.20
+**Version:** 1.24
 **Status:** Normative
-**Last Updated:** 2025-12-21
+**Last Updated:** 2025-12-23
 
 ---
 
@@ -203,13 +203,16 @@ Year 5+:   Deflationary (burn > emission)
 Year 20:   ~824M KRAT supply
 ```
 
-### Fee Distribution (60/30/10)
+### Fee Distribution (50/10/30/10 - SPEC v3.2)
 
-| Recipient | Share |
-|-----------|-------|
-| Validators | 60% |
-| Burn | 30% |
-| Treasury | 10% |
+| Recipient | Share | Description |
+|-----------|-------|-------------|
+| Block Producer | 50% | Reward for producing the block |
+| Finality Voters | 10% | Shared among GRANDPA finality participants |
+| Burn | 30% | Permanently removed (deflationary) |
+| Treasury | 10% | Community-governed development fund |
+
+**Note:** If no finality voters participated, their share goes to Treasury.
 
 ---
 
@@ -668,7 +671,7 @@ b(t) = b_max - (b_max - b_0) × e^(-g × t)
 
 ### Economic Invariants
 
-1. Fee distribution: 60% validators, 30% burn, 10% treasury
+1. Fee distribution: 50% producer, 10% finality voters, 30% burn, 10% treasury (SPEC v3.2)
 2. Emission distribution: 70% validators, 20% treasury, 10% reserve
 3. Minimum inflation: 0.5%
 4. Maximum inflation: 10%
@@ -687,7 +690,7 @@ b(t) = b_max - (b_max - b_0) × e^(-g × t)
 
 ### Overview
 
-KratOs implements decentralized peer discovery via **DNS Seeds**. When a node starts, it automatically discovers peers without manual configuration.
+KratOs implements decentralized peer discovery via **DNS Seeds**. When a node starts, it automatically discovers peers without manual configuration. The system uses the independent `kratos-dns-seed` application for peer registration and discovery.
 
 ### Discovery Hierarchy
 
@@ -695,9 +698,9 @@ KratOs implements decentralized peer discovery via **DNS Seeds**. When a node st
 Node Startup
     │
     ▼
-1. DNS Seeds (Primary)
-    │ seed1.kratos.network → [IP list]
-    │ seed2.kratos.community → [IP list]
+1. DNS Seeds (Primary) - kratos-dns-seed
+    │ Fetch signed IDpeers.json from HTTP API
+    │ Verify Ed25519 signature before trusting
     ▼
 2. Hardcoded Bootnodes (Fallback)
     │ /ip4/X.X.X.X/tcp/30333/p2p/...
@@ -712,6 +715,120 @@ Node Startup
 Connected to Network
 ```
 
+### Official DNS Seeds
+
+| Seed | IP Address | HTTP Port | Region |
+|------|------------|-----------|--------|
+| seed1 | 5.189.184.205 | 8080 | EU |
+| seed2 | 45.8.132.252 | 8080 | EU |
+| seed3 | 74.208.14.99 | 8080 | US |
+
+### DNS Seed Architecture (kratos-dns-seed)
+
+The DNS Seed service is an independent application that provides reliable peer discovery:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     kratos-dns-seed                              │
+├─────────────────────────────────────────────────────────────────┤
+│  HeartbeatReceiver (TCP:30334)  │  NetworkState Aggregator      │
+│         │                       │          │                     │
+│         ▼                       ▼          ▼                     │
+│  ┌─────────────────────────────────────────────────────┐        │
+│  │           PeerRegistry (RocksDB) + Scoring           │        │
+│  └─────────────────────────────────────────────────────┘        │
+│         │                                    │                   │
+│         ▼                                    ▼                   │
+│  DNS Server (UDP:53)              HTTP API (:8080)              │
+│         │                                    │                   │
+│         └────────► IDpeers.json ◄────────────┘                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Heartbeat Protocol
+
+Nodes register themselves with DNS Seeds via signed heartbeats:
+
+```rust
+pub struct HeartbeatMessage {
+    pub peer_id: String,           // libp2p PeerId
+    pub public_key: [u8; 32],      // Ed25519 public key
+    pub ip_address: String,        // Node's IP
+    pub p2p_port: u16,             // Default: 30333
+    pub chain_height: u64,         // Current block height
+    pub epoch: u64,                // Current epoch
+    pub validator: bool,           // Is active validator
+    pub timestamp: i64,            // Unix timestamp
+    pub version: String,           // Node version
+    pub signature: [u8; 64],       // Ed25519 signature
+}
+```
+
+**Heartbeat Flow:**
+```
+Node                              DNS Seed (TCP:30334)
+  │                                     │
+  │─────── TCP Connect ────────────────►│
+  │─────── HeartbeatMessage ───────────►│
+  │        (signed with node key)       │
+  │◄────── NetworkStateInfo ────────────│
+  │        (security state broadcast)   │
+  └───── Repeat every 2 minutes ────────┘
+```
+
+### IDpeers.json Format
+
+DNS Seeds generate cryptographically signed peer lists:
+
+```json
+{
+  "version": 1,
+  "generated_at": "2025-12-23T10:00:00Z",
+  "ttl_seconds": 300,
+  "network_state": "Normal",
+  "peers": [
+    {
+      "peer_id": "12D3KooW...",
+      "ip": "45.8.132.252",
+      "port": 30333,
+      "score": 950,
+      "validator": true,
+      "last_seen": 1703329200
+    }
+  ],
+  "signature": "hex-encoded-ed25519-signature",
+  "signer_pubkey": "hex-encoded-public-key"
+}
+```
+
+### DNS Seed Client Integration
+
+Nodes fetch peer lists from DNS Seeds:
+
+```rust
+// In network/dns_seed_client.rs
+pub async fn fetch_peers_from_dns_seed(seed_url: &str) -> Result<Vec<PeerInfo>> {
+    let client = reqwest::Client::new();
+    let response = client.get(format!("{}/peers", seed_url))
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await?;
+
+    let id_peers: IdPeersFile = response.json().await?;
+    verify_idpeers_signature(&id_peers)?;  // Ed25519 verification
+    Ok(id_peers.peers)
+}
+```
+
+### Peer Scoring System
+
+| Score Range | Status | Selection Priority |
+|-------------|--------|-------------------|
+| 800-1000 | Excellent | High priority |
+| 500-799 | Good | Normal selection |
+| 200-499 | Marginal | Low priority |
+| 0-199 | Poor | Excluded from lists |
+
 ### DNS Seed Requirements
 
 | Requirement | Value |
@@ -722,28 +839,24 @@ Connected to Network
 | Update frequency | <= 60 seconds |
 | Max stale entries | 10% |
 
-### Fallback Bootstrap Nodes
-
-| Node | IP | Peer ID | Operator |
-|------|-----|---------|----------|
-| Foundation Node 1 | 78.240.168.225 | 12D3KooWEko82Ro... | KratOs Foundation |
-
 ### Configuration Constants
 
 ```rust
 pub const DEFAULT_P2P_PORT: u16 = 30333;
-pub const DNS_TIMEOUT_SECS: u64 = 10;
-pub const MAX_DNS_PEERS: usize = 25;
+pub const HEARTBEAT_PORT: u16 = 30334;
+pub const DNS_SEED_HTTP_PORT: u16 = 8080;
+pub const HEARTBEAT_INTERVAL_SECS: u64 = 120;
 ```
 
 ### Security Considerations
 
 | Threat | Mitigation |
 |--------|------------|
-| Poisoned seeds | Multiple independent sources |
+| Poisoned seeds | Cryptographic signature verification |
+| Sybil attack | Score-based selection prioritizes established peers |
+| Replay attack | Timestamp validation (max 5 minutes drift) |
+| Eclipse attack | Multiple independent DNS Seeds required |
 | DNS hijacking | Fallback to hardcoded bootnodes |
-| Eclipse attack | DHT propagation diversifies peers |
-| Sybil seeds | Community vetting of operators |
 
 ### mDNS Local Discovery
 
@@ -797,14 +910,16 @@ MdnsEvent::Discovered(list) => {
 
 **Source:** `network/service.rs:472-486`, `network/peer.rs:291-294`, `cli/runner.rs:146-160`, `node/service.rs:1014-1036`
 
-### Becoming a Seed Operator
+### Becoming a DNS Seed Operator
 
-1. Run a DNS seed server (see implementation)
-2. Maintain 99.9% uptime for 30 days
-3. Submit PR to add seed to official list
-4. Pass community review for independence
+1. Deploy `kratos-dns-seed` application
+2. Configure heartbeat receiver (TCP port 30334)
+3. Configure HTTP API (port 8080)
+4. Maintain 99.9% uptime for 30 days
+5. Submit PR to add seed to official list
+6. Pass community review for independence
 
-**Source:** `network/dns_seeds.rs`
+**Source:** `network/dns_seeds.rs`, `network/dns_seed_client.rs`, [SPEC 6 §20](../spec/SPEC_6_NETWORK_SECURITY.md#20-dns-seed-service-kratos-dns-seed)
 
 ---
 
@@ -952,7 +1067,7 @@ pub const GENESIS_PROTOCOL: &str = "/kratos/genesis/1.0.0";
 ### Source Structure
 
 ```
-rust/kratos-core/src/
+rust/kratos-core/src/                    # Main node implementation
 ├── consensus/
 │   ├── clock_health.rs   # Clock status & drift tracking
 │   ├── economics.rs      # Bootstrap, security states
@@ -968,7 +1083,8 @@ rust/kratos-core/src/
 │   ├── governance.rs     # Proposals & voting
 │   └── sidechains.rs     # Chain registry
 ├── network/
-│   ├── dns_seeds.rs      # DNS seed resolver & registry
+│   ├── dns_seeds.rs      # DNS seed registry
+│   ├── dns_seed_client.rs # DNS seed client (fetch IDpeers.json)
 │   ├── service.rs        # P2P networking
 │   └── sync.rs           # Chain synchronization
 ├── types/
@@ -982,6 +1098,17 @@ rust/kratos-core/src/
 └── cli/
     ├── mod.rs            # CLI commands
     └── config.rs         # Node configuration
+
+rust/kratos-dns-seed/src/                # DNS Seed service (independent)
+├── main.rs               # Application entry point
+├── heartbeat/            # Heartbeat receiver (TCP:30334)
+├── registry/             # Peer registry + scoring (RocksDB)
+├── network_state/        # Network state aggregator
+├── api/                  # HTTP API (:8080)
+├── dns/                  # DNS server (UDP:53)
+├── distribution/         # IDpeers.json generation
+├── crypto/               # Ed25519 signatures
+└── types/                # Shared types
 ```
 
 ### Running a Node
@@ -1015,6 +1142,7 @@ cargo build --release
 | Contributor roles | SPEC 7 | 1, 5 |
 | Clock health & drift | Synthesis §11 | 3, 6 |
 | Peer discovery | SPEC 6 §12 | Synthesis §15 |
+| DNS Seed Service | SPEC 6 §20 | Synthesis §15 |
 | Genesis exchange | Synthesis §16 | Synthesis §15, 17 |
 
 ---
@@ -1120,7 +1248,223 @@ Signature domains prevent cross-context signature reuse:
 
 ---
 
-## 19. Known Issues & Technical Debt
+## 19. GRANDPA Finality Gadget
+
+### Overview
+
+KratOs uses a **GRANDPA-style** Byzantine Fault Tolerant finality gadget running parallel to block production. While blocks are produced via VRF slot selection, finality is achieved through a separate voting protocol.
+
+### Key Properties
+
+| Property | Value |
+|----------|-------|
+| **Threshold** | 2/3 supermajority (66%) |
+| **Minimum validators** | 3 for finality |
+| **Round timeout** | 6 seconds |
+| **Vote types** | Prevote, Precommit |
+| **Domain separation** | `KRATOS_FINALITY_V1:` |
+
+### Protocol Flow
+
+```
+Prevoting Phase                Precommitting Phase              Finalized
+┌─────────────────┐            ┌─────────────────┐            ┌──────────┐
+│ Validators vote │ ─────────► │ Commit with 2/3 │ ─────────► │ Block is │
+│ on best chain   │  2/3       │ prevote target  │  2/3       │ finalized│
+└─────────────────┘  prevotes  └─────────────────┘ precommits └──────────┘
+```
+
+### Round States
+
+| State | Description |
+|-------|-------------|
+| **Prevoting** | Initial phase, collecting prevotes |
+| **Precommitting** | 2/3 prevotes reached, collecting precommits |
+| **Completed** | 2/3 precommits reached, block finalized |
+| **Failed** | Round timed out without consensus |
+
+### Vote Structure
+
+```rust
+pub struct FinalityVote {
+    pub vote_type: VoteType,       // Prevote or Precommit
+    pub target_number: BlockNumber,
+    pub target_hash: Hash,
+    pub round: u32,
+    pub epoch: EpochNumber,
+    pub voter: AccountId,
+    pub signature: Signature64,
+    pub timestamp: Timestamp,
+}
+```
+
+### Signing Message Format
+
+```rust
+// Domain-separated signing message
+signing_message = DOMAIN_FINALITY || vote_type || target_number || target_hash || round || epoch || voter
+```
+
+Where `DOMAIN_FINALITY = b"KRATOS_FINALITY_V1:"`.
+
+### Equivocation Detection
+
+The VoteCollector detects double voting:
+
+```rust
+pub struct EquivocationProof {
+    pub voter: AccountId,
+    pub vote_type: VoteType,
+    pub first_vote: (BlockNumber, Hash),
+    pub second_vote: (BlockNumber, Hash),
+    pub first_signature: Signature64,
+    pub second_signature: Signature64,
+    pub round: u32,
+    pub epoch: EpochNumber,
+}
+```
+
+**Slashing**: Equivocation triggers `Critical` severity slashing (50% VC, 5-20% stake).
+
+### Finality Justification
+
+When a block is finalized, a justification is created:
+
+```rust
+pub struct FinalityJustification {
+    pub block_number: BlockNumber,
+    pub block_hash: Hash,
+    pub signatures: Vec<ValidatorSignature>,
+    pub epoch: EpochNumber,
+}
+```
+
+### Network Messages
+
+| Message | Purpose |
+|---------|---------|
+| `FinalityVote` | Broadcast vote (prevote/precommit) |
+| `FinalityJustification` | Broadcast completed finalization |
+| `FinalityVotesRequest` | Request votes for catch-up |
+| `FinalityVotesResponse` | Response with votes |
+
+### Gossip Topic
+
+```rust
+GossipTopic::Finality => "/kratos/finality/1.0.0"
+```
+
+### RPC Methods
+
+| Method | Description |
+|--------|-------------|
+| `finality_getStatus` | Get current finality status |
+| `finality_getLastFinalized` | Get last finalized block |
+| `finality_getJustification` | Get justification for block |
+| `finality_getRoundInfo` | Get current round info |
+
+### Implementation Files
+
+| File | Contents |
+|------|----------|
+| `consensus/finality/mod.rs` | Module structure, supermajority helpers |
+| `consensus/finality/types.rs` | FinalityVote, VoteType, EquivocationProof |
+| `consensus/finality/votes.rs` | VoteCollector with equivocation detection |
+| `consensus/finality/rounds.rs` | FinalityRound, RoundManager |
+| `consensus/finality/gadget.rs` | FinalityGadget coordinator |
+| `network/protocol.rs` | Network messages for finality |
+| `rpc/methods.rs` | Finality RPC endpoints |
+
+### Supermajority Calculation
+
+```rust
+pub fn has_supermajority(count: usize, total: usize) -> bool {
+    if total == 0 { return false; }
+    count * 100 >= total * 66  // 66% threshold
+}
+```
+
+### Integration with Block Production
+
+```
+┌───────────────────────────────────────────────────────────────────┐
+│                      Block Lifecycle                               │
+├───────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│   VRF Selection          Block Production        Finality         │
+│   ─────────────          ────────────────        ────────         │
+│                                                                    │
+│   ┌─────────────┐        ┌──────────────┐       ┌─────────────┐  │
+│   │ Select slot │ ──────►│ Produce block│ ──────►│ Prevote     │  │
+│   │   leader    │        │ (sign, gossip)│       │ round starts│  │
+│   └─────────────┘        └──────────────┘       └─────────────┘  │
+│                                                        │          │
+│                                                        ▼          │
+│                                                  ┌─────────────┐  │
+│                                                  │ 2/3 prevotes│  │
+│                                                  │ → precommit │  │
+│                                                  └─────────────┘  │
+│                                                        │          │
+│                                                        ▼          │
+│                                                  ┌─────────────┐  │
+│                                                  │ 2/3 commits │  │
+│                                                  │ → FINALIZED │  │
+│                                                  └─────────────┘  │
+│                                                                    │
+└───────────────────────────────────────────────────────────────────┘
+```
+
+**Source:** SPEC_3 §6, `consensus/finality/`
+
+### Node Integration
+
+The finality gadget is integrated into the node service via `FinalityIntegration`:
+
+**Location:** `node/finality_integration.rs`
+
+| Component | Purpose |
+|-----------|---------|
+| `NodeFinalitySigner` | Signs finality votes (keypair in secure closure) |
+| `NodeFinalityBroadcaster` | Broadcasts via unbounded channel to network |
+| `FinalityIntegration` | Coordinates gadget with node lifecycle |
+
+**Initialization:**
+```rust
+// In runner.rs - validator mode
+if let Some(ref key) = validator_key {
+    node.initialize_finality(key.clone()).await;
+}
+```
+
+**Event Loop:**
+```rust
+// Finality tick every SLOT_DURATION_SECS
+_ = finality_tick_interval.tick() => {
+    node.tick_finality().await;
+    node.broadcast_finality_messages().await;
+}
+```
+
+**Network Events:**
+- `FinalityVoteReceived` - Process incoming prevote/precommit
+- `FinalityJustificationReceived` - Process finalization proof
+
+**Fee Distribution to Voters:**
+
+Finality participants receive 10% of transaction fees:
+
+| Recipient | Share |
+|-----------|-------|
+| Block Producer | 50% |
+| **Finality Voters** | **10%** (shared equally) |
+| Burn | 30% |
+| Treasury | 10% |
+
+**Source:** `node/finality_integration.rs`, `node/service.rs`, `cli/runner.rs`
+
+---
+
+## 20. Known Issues & Technical Debt
 
 The following issues were identified during security audit (2025-12-19) and have been fixed:
 
@@ -1139,11 +1483,11 @@ The following issues were identified during security audit (2025-12-19) and have
 
 ### Security Audit Reference
 
-Full audit report: [SECURITY_AUDIT_REPORT.md](../SECURITY_AUDIT_REPORT.md)
+Full audit report: [SECURITY_AUDIT_REPORT.md](../../SECURITY_AUDIT_REPORT.md)
 
 ---
 
-## 20. Early Validator Voting System
+## 21. Early Validator Voting System
 
 ### Overview
 
@@ -1250,7 +1594,7 @@ Transaction Flow:
 
 ---
 
-## 21. Sync Race Condition Handling
+## 22. Sync Race Condition Handling
 
 ### Problem
 
@@ -1361,7 +1705,7 @@ async fn try_import_buffered_blocks(&self) {
 
 ---
 
-## 22. Genesis Timestamp Fix
+## 23. Genesis Timestamp Fix
 
 ### Problem
 
@@ -1418,7 +1762,7 @@ Slots validated against genesis time (not wall clock)
 
 ---
 
-## 23. Block Production vs Import
+## 24. Block Production vs Import
 
 ### Problem
 
@@ -1475,7 +1819,7 @@ async fn store_produced_block(&self, block: Block) -> Result<(), NodeError> {
 
 ---
 
-## 24. RPC Channel Architecture
+## 25. RPC Channel Architecture
 
 ### Overview
 
@@ -1552,7 +1896,7 @@ To add a new RPC method, modify **three files**:
 
 ---
 
-## 25. Hex String Deserialization
+## 26. Hex String Deserialization
 
 ### Problem
 
@@ -1594,7 +1938,7 @@ fn visit_seq()   // For JSON arrays [1, 2, 3, ...]
 
 ---
 
-## 26. Transaction Hash Auto-Computation
+## 27. Transaction Hash Auto-Computation
 
 ### Problem
 
@@ -1633,7 +1977,7 @@ impl Transaction {
 
 ---
 
-## 27. Wallet-Node RPC Integration
+## 28. Wallet-Node RPC Integration
 
 ### Wallet RPC Client
 
@@ -1682,7 +2026,7 @@ Node deserializes hex strings via custom `Deserialize` implementations.
 
 ---
 
-## 28. VRF Slot Selection
+## 29. VRF Slot Selection
 
 ### Problem
 
@@ -1725,7 +2069,7 @@ Before producing a block, validators check if they are the VRF-selected slot lea
 
 ---
 
-## 29. Bootstrap VC Initialization
+## 30. Bootstrap VC Initialization
 
 ### Problem
 
@@ -1780,7 +2124,7 @@ With 100 VC initialized:
 
 ---
 
-## 30. Deadlock Prevention in import_block()
+## 31. Deadlock Prevention in import_block()
 
 ### Problem
 
@@ -1812,7 +2156,7 @@ storage.initialize_bootstrap_vc(...);  // Reuse existing lock
 
 ---
 
-## 31. Sync Request Rate-Limiting
+## 32. Sync Request Rate-Limiting
 
 ### Problem
 
@@ -1866,10 +2210,62 @@ if self.pending_sync_requests >= MAX_PENDING_SYNC_REQUESTS {
 
 ---
 
-## 32. Document History
+## 33. State-Aware Mempool Transaction Selection
+
+### The Problem
+
+During block production, `produce_block()` was calling `mempool.select_transactions()` which initializes the expected nonce to 0 for each account. This caused valid transactions to be skipped when an account's on-chain nonce was greater than 0.
+
+**Symptom:** Transactions remained stuck in the mempool (`pendingCount: 1`) while blocks were produced with 0 transactions (`txCount: 0`).
+
+**Root Cause:**
+```rust
+// In select_transactions() - BAD
+let expected_nonce = account_nonces.get(&sender).copied().unwrap_or(0);
+if entry.nonce > expected_nonce {
+    continue;  // Skips valid tx with nonce=1 when on-chain nonce=1!
+}
+```
+
+### The Solution
+
+Modified `produce_block()` to use `select_transactions_with_state()` which queries the actual account nonce from chain state:
+
+```rust
+// In produce_block() - FIXED
+let transactions = {
+    let mempool_guard = mempool.read().await;
+    let mut state_guard = state.write().await;
+    mempool_guard.select_transactions_with_state(
+        self.config.max_transactions_per_block,
+        &mut state_guard,
+    )
+};
+```
+
+The `select_transactions_with_state()` function:
+1. Reads the actual account nonce from `StateBackend`
+2. Only includes transactions where `tx.nonce == expected_nonce`
+3. Correctly handles accounts that have already executed transactions
+
+### Result
+
+- Transactions with nonce > 0 are correctly selected for block inclusion
+- No more "stuck in mempool" syndrome for accounts with prior activity
+- Block production properly includes pending transactions
+
+**Source:** `node/producer.rs:1083-1093`, `node/mempool.rs:775-825`
+
+---
+
+## 34. Document History
 
 | Date | Version | Change |
 |------|---------|--------|
+| 2025-12-23 | 1.24 | **DNS Seed Service**: Updated §15 with kratos-dns-seed architecture - heartbeat protocol, IDpeers.json, peer scoring, network state awareness. Added kratos-dns-seed to §17 source structure |
+| 2025-12-22 | 1.23 | **Finality Node Integration**: Added node-level finality integration in §19 - FinalityIntegration, NodeFinalitySigner, NodeFinalityBroadcaster, fee distribution to finality voters (10%) |
+| 2025-12-22 | 1.22 | **GRANDPA Finality Gadget**: Added §19 with full BFT finality implementation - prevote/precommit phases, equivocation detection, finality justification, network messages, RPC methods |
+| 2025-12-22 | 1.21 | **Mempool Transaction Selection Fix**: Block production now uses state-aware nonce tracking - fixes transactions stuck in mempool with nonce > 0 |
 | 2025-12-21 | 1.20 | **Deadlock Fix**: Fixed tokio RwLock deadlock in import_block() - VC initialization for early validators now reuses outer storage lock |
 | 2025-12-21 | 1.19 | **Joining Node VC Fix**: Added VC initialization in `apply_received_genesis_state()` - fixes state root mismatch on block #1 import |
 | 2025-12-21 | 1.18 | **Genesis Validator VC Fix**: Genesis validators now get 100 VC at creation for VRF eligibility. All validators (genesis + early) now use bootstrap model (0 stake, 0 balance, earn through validation) |

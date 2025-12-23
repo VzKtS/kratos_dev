@@ -33,6 +33,8 @@ pub enum GossipTopic {
     Transactions,
     /// Consensus messages
     Consensus,
+    /// Finality votes and justifications
+    Finality,
 }
 
 impl GossipTopic {
@@ -41,6 +43,7 @@ impl GossipTopic {
             GossipTopic::Blocks => "/kratos/blocks/1.0.0",
             GossipTopic::Transactions => "/kratos/transactions/1.0.0",
             GossipTopic::Consensus => "/kratos/consensus/1.0.0",
+            GossipTopic::Finality => "/kratos/finality/1.0.0",
         }
     }
 }
@@ -94,6 +97,35 @@ pub enum NetworkMessage {
         /// Chain name for verification
         chain_name: String,
     },
+
+    // =========================================================================
+    // FINALITY PROTOCOL (GRANDPA-style)
+    // Used for Byzantine fault tolerant block finalization
+    // =========================================================================
+
+    /// Finality vote (prevote or precommit)
+    FinalityVote {
+        /// Serialized FinalityVote
+        vote_data: Vec<u8>,
+    },
+
+    /// Finality justification (completed finalization)
+    FinalityJustification {
+        /// Serialized FinalityJustification
+        justification_data: Vec<u8>,
+    },
+
+    /// Request for finality votes in a round
+    FinalityVotesRequest {
+        epoch: u64,
+        round: u32,
+    },
+
+    /// Response with finality votes
+    FinalityVotesResponse {
+        votes: Vec<Vec<u8>>,
+        epoch: u64,
+    },
 }
 
 impl NetworkMessage {
@@ -139,6 +171,10 @@ impl NetworkMessage {
             NetworkMessage::NewBlock(_) => GossipTopic::Blocks,
             NetworkMessage::NewTransaction(_) => GossipTopic::Transactions,
             NetworkMessage::ConsensusMessage { .. } => GossipTopic::Consensus,
+            NetworkMessage::FinalityVote { .. } => GossipTopic::Finality,
+            NetworkMessage::FinalityJustification { .. } => GossipTopic::Finality,
+            NetworkMessage::FinalityVotesRequest { .. } => GossipTopic::Finality,
+            NetworkMessage::FinalityVotesResponse { .. } => GossipTopic::Finality,
             _ => GossipTopic::Blocks, // Par défaut
         }
     }

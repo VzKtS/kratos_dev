@@ -1,14 +1,21 @@
 KratOs — Vision Report --- https://github.com/VzKtS/kratos_dev ---
-INFO "The creator/founder (Vzcrow) will initiate the blockchain genesis with no financial 
-or technical advantages, and will be subject to community votes and consensus mechanisms 
-like all other participant. They may have their validator status (network security) revoked and lose 
-the associated KRAT (native network token) compensation as a result."
+INFO "The creator/founder (Vzcrow) will launch the blockchain's 
+development without any financial or technical advantage and 
+will be subject to community votes and consensus mechanisms, 
+like all other participants. Their status as a validator 
+(guarantor of network security) can be revoked, resulting 
+in the loss of the associated KRAT (the network's native token) revenue.."
 
 A Decentralized Infrastructure for Human Coordination
 
 1. Introduction
-KratOs is not a blockchain designed to optimize transactions, speculation, or short-term efficiency. It is an attempt to address a much more difficult question:
-How can large groups of humans coordinate, decide, and coexist over the long term without central authority, without collapsing under their own complexity, and without being captured by wealth, ideology, or technology?
+KratOs is not a blockchain designed to optimize transactions, 
+speculation, or short-term efficiency. 
+It is an attempt to address a much more difficult question:
+How can large groups of humans coordinate, decide, and coexist 
+over the long term without central authority, without collapsing 
+under their own complexity, and without being captured by wealth, 
+ideology, or technology?
 
 KratOs is a long-term human governance protocol, designed on the premise that:
 
@@ -28,7 +35,8 @@ Economic capital becomes political capital.
 Digital systems optimize for speed, not legitimacy.
 A central failure propagates throughout the entire system.
 
-Blockchains have attempted to provide an answer, but most have reproduced the same flaws:
+Blockchains have attempted to provide an answer, but most have reproduced 
+the same flaws:
 
 stake becomes power,
 early adopters dominate permanently,
@@ -42,9 +50,11 @@ Governance must be slow, local, revocable, and allowed to fail in isolation.
 
 KratOs rests on five philosophical axioms:
 3.1 Imperfection Is Inevitable
-The system does not seek to eliminate conflicts or bad decisions. It seeks to contain them.
+The system does not seek to eliminate conflicts or bad decisions. It seeks 
+to contain them.
 3.2 Power Must Accumulate Slowly
-Any form of influence—economic, political, or technical—must require time, not just capital.
+Any form of influence—economic, political, or technical—must require time, 
+not just capital.
 3.3 Exit Is More Important Than Voice
 The ability to leave, fork, or dissolve is more stabilizing than endless debate.
 3.4 All Politics Is Local
@@ -87,7 +97,8 @@ ideology,
 imposed identity,
 definitions of human rights.
 
-This minimalism is deliberate: the core must survive political, cultural, and technological upheavals.
+This minimalism is deliberate: the core must survive political, cultural, 
+and technological upheavals.
 5.2 Sidechains as Living Communities
 Each community exists as a sidechain:
 
@@ -229,6 +240,7 @@ simplicity for depth.
 
 KratOs is not the promise of a better world.
 
-It is a framework allowing many worlds to coexist—and fail—without destroying each other.
+It is a framework allowing many worlds to coexist—and 
+fail—without destroying each other.
 
 

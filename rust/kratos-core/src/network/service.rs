@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, trace};
 
 // =============================================================================
 // BLOCK PROVIDER TRAIT
@@ -105,6 +105,18 @@ pub enum NetworkEvent {
         genesis_validators: Vec<super::request::GenesisValidatorInfo>,
         /// Genesis balances (for state initialization)
         genesis_balances: Vec<(crate::types::AccountId, crate::types::Balance)>,
+    },
+
+    /// Finality vote received via gossip (GRANDPA)
+    FinalityVoteReceived {
+        vote_data: Vec<u8>,
+        from: PeerId,
+    },
+
+    /// Finality justification received via gossip (GRANDPA)
+    FinalityJustificationReceived {
+        justification_data: Vec<u8>,
+        from: PeerId,
     },
 }
 
@@ -392,6 +404,15 @@ impl NetworkService {
         Ok(())
     }
 
+    /// Broadcast a finality message via gossip
+    ///
+    /// Used for GRANDPA finality votes and justifications
+    pub fn broadcast_finality(&mut self, msg: NetworkMessage) -> Result<(), Box<dyn Error>> {
+        let data = msg.encode()?;
+        self.swarm.behaviour_mut().publish(GossipTopic::Finality, data)?;
+        Ok(())
+    }
+
     /// Request a specific block from a peer
     pub fn request_block(&mut self, peer_id: &PeerId, hash: Hash) {
         let request = KratosRequest::Block(BlockRequest::ByHash(hash));
@@ -628,6 +649,30 @@ impl NetworkService {
                     transaction: tx,
                     from: *from,
                 });
+            }
+            Ok(NetworkMessage::FinalityVote { vote_data }) => {
+                trace!(
+                    "[GRANDPA] network: received FinalityVote from peer {}, data_len={}",
+                    from, vote_data.len()
+                );
+                debug!("Received finality vote from {}", from);
+                let _ = self.event_tx.send(NetworkEvent::FinalityVoteReceived {
+                    vote_data,
+                    from: *from,
+                });
+                trace!("[GRANDPA] network: FinalityVoteReceived event sent to node");
+            }
+            Ok(NetworkMessage::FinalityJustification { justification_data }) => {
+                trace!(
+                    "[GRANDPA] network: received FinalityJustification from peer {}, data_len={}",
+                    from, justification_data.len()
+                );
+                debug!("Received finality justification from {}", from);
+                let _ = self.event_tx.send(NetworkEvent::FinalityJustificationReceived {
+                    justification_data,
+                    from: *from,
+                });
+                trace!("[GRANDPA] network: FinalityJustificationReceived event sent to node");
             }
             Ok(msg) => {
                 debug!("Received other gossip message: {:?}", msg);
@@ -1004,6 +1049,11 @@ impl NetworkService {
     /// Get local peer ID
     pub fn local_peer_id(&self) -> PeerId {
         self.local_peer_id
+    }
+
+    /// Get local listening addresses (for DNS Seed heartbeats)
+    pub fn local_listen_addresses(&self) -> Vec<Multiaddr> {
+        self.swarm.listeners().cloned().collect()
     }
 
     /// Cleanup rate limiter

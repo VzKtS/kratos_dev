@@ -46,6 +46,9 @@ dirs = "5.0"
 libp2p = { version = "0.53", features = ["tcp", "noise", "yamux", "gossipsub", "kad", "tokio", "macros", "request-response"] }
 futures = "0.3"
 
+# HTTP client for DNS Seed communication
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+
 # RPC
 warp = "0.3"
 

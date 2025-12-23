@@ -142,6 +142,10 @@ pub struct RunCmd {
     /// Allow connections from any origin (CORS)
     #[arg(long)]
     pub rpc_cors_all: bool,
+
+    /// Enable detailed trace logs for GRANDPA finality debugging
+    #[arg(long)]
+    pub debug_grandpa: bool,
 }
 
 /// Show node info
@@ -380,6 +384,7 @@ mod tests {
             public_addr: None,
             rpc_methods_unsafe: false,
             rpc_cors_all: false,
+            debug_grandpa: false,
         };
 
         let path = cmd.get_base_path();
