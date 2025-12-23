@@ -232,6 +232,15 @@ async fn try_produce_block(node: &Arc<KratOsNode>, validator_key: &SigningKey, g
         return;
     }
 
+    // Additional check: wait for network to stabilize after becoming validator
+    // This prevents producing conflicting blocks when joining an existing network
+    let sync_gap = node.sync_gap().await;
+    if sync_gap > 0 {
+        // If there's any gap, wait for the network blocks to arrive first
+        debug!("Sync gap {} > 0, waiting for network blocks before producing", sync_gap);
+        return;
+    }
+
     // Try to produce block
     match node.try_produce_block(validator_key.clone(), current_epoch, current_slot).await {
         Ok(Some(block)) => {

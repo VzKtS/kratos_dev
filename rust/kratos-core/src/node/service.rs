@@ -1424,8 +1424,23 @@ impl KratOsNode {
     }
 
     /// Check if node is synced
+    /// A node is considered synced when:
+    /// 1. The gap to the best known network height is less than 2 blocks
+    /// 2. We have at least imported some blocks from the network (height > 0)
+    /// This prevents producing blocks while still catching up
     pub async fn is_synced(&self) -> bool {
-        self.sync_gap().await < 5
+        let gap = self.sync_gap().await;
+        let height = *self.chain_height.read().await;
+
+        // During initial sync, be more conservative
+        // We need at least some blocks and a very small gap
+        if height < 10 {
+            // Very early in chain, need to be fully synced
+            gap == 0
+        } else {
+            // After initial sync, allow 1 block gap (for propagation delay)
+            gap <= 1
+        }
     }
 
     /// Get connected peer IDs
